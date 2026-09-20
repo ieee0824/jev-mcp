@@ -1,6 +1,7 @@
 use std::{
+    io::{self, Write},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -13,7 +14,31 @@ use wiremock::{
     matchers::{body_json, header, method, path},
 };
 
-use crate::{client::TypeSafeClient, error::ErrorKind, server::JevServer};
+use crate::{client::TypeSafeClient, error::ErrorKind, server::JevServer, telemetry::Telemetry};
+
+#[derive(Clone, Default)]
+struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SharedBuffer {
+    fn events(&self) -> Vec<Value> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
 
 fn client(mock: &MockServer, key: Option<&str>) -> TypeSafeClient {
     TypeSafeClient::new(
@@ -284,6 +309,73 @@ async fn retries_rate_limit_and_overload_then_succeeds() {
         .unwrap();
     assert_eq!(result.is_error, Some(false));
     assert_eq!(count.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn telemetry_records_success_retries_and_failure_without_private_input() {
+    let mock = MockServer::start().await;
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(429).insert_header("Retry-After", "0")
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(response(json!({"result":{"type":"noul","noul":0.7}})))
+            }
+        })
+        .expect(2)
+        .mount(&mock)
+        .await;
+    let output = SharedBuffer::default();
+    let telemetry = Telemetry::with_writer(output.clone());
+    let server = JevServer::with_telemetry(client(&mock, Some("test-secret")), telemetry);
+    server
+        .dispatch(
+            "jev.noul",
+            json!({"state":"private-state","instructions":"private-question","model":"requested-model"}),
+        )
+        .await
+        .unwrap();
+
+    let failure_output = SharedBuffer::default();
+    let failure_server = JevServer::with_telemetry(
+        client(&mock, None),
+        Telemetry::with_writer(failure_output.clone()),
+    );
+    failure_server
+        .dispatch("jev.noul", noul_args())
+        .await
+        .unwrap();
+
+    let success = &output.events()[0];
+    assert_eq!(success["tool"], "jev.noul");
+    assert_eq!(success["question_count"], 1);
+    assert_eq!(success["attempts"], 2);
+    assert_eq!(success["status"], "success");
+    assert_eq!(success["requested_model"], "requested-model");
+    assert_eq!(success["resolved_model"], "jev-test");
+    assert_eq!(success["input_tokens"], 21);
+    assert_eq!(success["output_tokens"], 5);
+    assert!(success["elapsed_ms"].is_u64());
+
+    let failure = &failure_output.events()[0];
+    assert_eq!(failure["status"], "error");
+    assert_eq!(failure["attempts"], 0);
+    assert_eq!(failure["error"]["kind"], "authentication");
+    let serialized = format!("{success}{failure}");
+    for private in [
+        "private-state",
+        "private-question",
+        "test-secret",
+        "instructions",
+        "criteria",
+        "probabilities",
+    ] {
+        assert!(!serialized.contains(private));
+    }
+    assert!(!Telemetry::disabled().is_enabled());
 }
 
 #[tokio::test]

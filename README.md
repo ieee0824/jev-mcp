@@ -85,6 +85,13 @@ tool_timeout_sec = 70
 | --- | --- |
 | `TYPESAFE_API_KEY` | API 認証に使う Bearer トークン。未設定・空でもツール一覧は取得できますが、評価時にエラーを返します。 |
 | `TYPESAFE_MODEL` | 既定のモデル。省略時は `jev-latest`。各ツールの `model` 引数で上書きできます。 |
+| `JEV_TELEMETRY` | `1` または `true` で、入力を含まない呼び出し統計を stderr に JSONL で出力します。既定は無効です。 |
+
+### 呼び出しテレメトリ
+
+`JEV_TELEMETRY=1` を設定すると、ツール呼び出しごとに1行の JSON を stderr に出力します。成功時はツール名、質問数、所要時間、試行回数、要求・解決されたモデル、入出力トークン数を記録します。失敗時は構造化エラーの `kind` を記録します。
+
+`state`、`instructions`、`criteria`、確率分布、API キーは記録しません。MCP 通信に使う stdout には出力しません。
 
 ## ツールの使い方
 
