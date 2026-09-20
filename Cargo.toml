@@ -1,0 +1,19 @@
+[package]
+name = "jev-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A stdio MCP server for TypeSafe AI's Jev decision model"
+
+[dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "3.4.0", default-features = false, features = ["server", "transport-io"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+rmcp = { version = "3.4.0", default-features = false, features = ["client"] }
+wiremock = "0.6"
+tokio = { version = "1", features = ["process", "io-util"] }
