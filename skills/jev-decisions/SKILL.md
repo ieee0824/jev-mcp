@@ -26,6 +26,7 @@ description: "Jev MCP を使い、コーディング作業の判断材料を分�
 
 - 障害原因の仮説を現在の証拠で順位付けし、次の診断を選ぶ場合は [references/hypothesis-ranking.md](references/hypothesis-ranking.md) を読む。
 - 修正を提出する前に、再現・因果・検証・回帰・影響範囲の証拠がそろっているか確認する場合は [references/evidence-sufficiency.md](references/evidence-sufficiency.md) を読む。
+- 呼び出し側が収集した短い作業履歴から、進展・行き詰まり・反復・検証準備を評価する場合は [references/trace-monitoring.md](references/trace-monitoring.md) を読む。
 
 ## 質問の組み立て
 
