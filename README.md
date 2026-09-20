@@ -271,7 +271,7 @@ POST https://api.typesafe.ai/v1/systemone
 | リダイレクト | 追従しない |
 | 応答サイズ | 最大8 MiB |
 
-入力の不備、キーの未設定、API エラー、不正な回答は `isError: true` の MCP ツール結果として返します。未知のツール名には JSON-RPC エラーを返します。
+入力の不備、キーの未設定、API エラー、不正な回答は `isError: true` の MCP ツール結果として返します。`structuredContent.error` には `kind`、`message`、`retryable` が入り、HTTP 応答がある場合は `status` も含まれます。`kind` は `validation`、`authentication`、`rate_limit`、`timeout`、`network`、`http`、`invalid_response` のいずれかです。呼び出し側は、この情報を使って再試行や人への確認を判断できます。未知のツール名には JSON-RPC エラーを返します。
 
 API のエラー本文や認証情報はエラーメッセージに含めません。標準出力は MCP メッセージ専用です。
 
