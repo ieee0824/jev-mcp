@@ -260,6 +260,26 @@ confidence < 0.60
 
 詳しくは [TypeSafe の Confidence ドキュメント](https://docs.typesafe.ai/confidence) を参照してください。
 
+## 評価ケースを検証する
+
+ラベル付き評価ケースは JSONL で管理できます。1行に一意な `id`、`state`、1件の `question`、同じ型の `expected` を記述します。`state` と `question` の制約は MCP ツールと共通です。
+
+```json
+{"id":"relevance","state":"変更した関数が失敗時のスタックトレースにあります。","question":{"type":"noul","instructions":"失敗は変更に関係していますか？"},"expected":{"type":"noul","min":0.7,"max":1.0}}
+{"id":"owner","state":{"change":"再試行ワーカー","failure":"再試行テスト"},"question":{"type":"choice","instructions":"最初に調べる箇所は？","criteria":{"worker":"バックグラウンド処理","api":"HTTP処理","unknown":"情報不足"}},"expected":{"type":"choice","allowed":["worker"]}}
+{"id":"risk","state":["再試行上限を3から0へ変更"],"question":{"type":"score","instructions":"動作変更のリスクは？","criteria":["低い","中程度","高い"]},"expected":{"type":"score","min":1.5,"max":2.0}}
+```
+
+- Noul の `expected` は `0 <= min <= max <= 1` の範囲です。
+- Choice の `allowed` は、正解として許容する1つ以上の選択肢です。
+- Score の `expected` は `0 <= min <= max <= 段階数 - 1` の範囲です。
+
+次のコマンドはファイル全体をオフラインで検証します。API キーやネットワーク接続は不要です。空ファイル、空行、重複 ID、入力制約違反、質問と期待値の型不一致を検出すると非0で終了します。
+
+```sh
+cargo run --locked -- eval validate tests/fixtures/eval-valid.jsonl
+```
+
 ## 通信とエラー処理
 
 すべてのツールは、渡された情報と質問を次のエンドポイントへ送信します。
