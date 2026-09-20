@@ -1,26 +1,72 @@
 # jev-mcp
 
-A lightweight MCP server for using Jev as a fast decision layer inside Codex workflows.
+[TypeSafe AI](https://docs.typesafe.ai/introduction) の判断モデル **Jev** を、Codex から利用するための軽量な MCP サーバーです。Rust で実装し、標準入出力（stdio）で MCP クライアントと通信します。
 
-Codex is good at understanding requirements, exploring repositories, editing code, running commands, and solving problems that require multi-step reasoning.
+Codex が要件の理解、コードの調査・編集、テストの実行を担い、その途中で必要になる分類、関連性の判定、候補の選択、評価を Jev に渡します。
 
-Jev is good at something different: making small, structured decisions quickly.
+```text
+Codex：調査・計画
+  ↓ 判断に必要な情報と質問
+Jev：分類・選択・評価
+  ↓ 型付きの回答と確率分布
+Codex：編集・テスト・次の行動
+```
 
-This project connects the two.
+## できること
 
-Instead of asking Codex to spend a full reasoning step on every small decision, Codex can delegate narrow classification, scoring, routing, and relevance checks to Jev through MCP.
+次の4つの MCP ツールを提供します。
 
-## Build and connect
+| ツール | 用途 | 主な回答 |
+| --- | --- | --- |
+| `jev.noul` | 条件が成立するかを判定する | Yes の確率 `noul`（0〜1） |
+| `jev.choice` | 名前付きの選択肢から1つ選ぶ | `choice`、`probabilities`、`confidence` |
+| `jev.score` | 順序のある評価基準に沿って採点する | `score`、`legend`、`probabilities`、`confidence` |
+| `jev.batch` | 同じ情報に対する複数の質問をまとめて評価する | 質問 ID ごとの回答 |
 
-Requires Rust 1.88 or newer and a TypeSafe API key for evaluations.
+たとえば、次のような判断に利用できます。
+
+- ファイルの内容が現在の不具合に関係しているか
+- テスト失敗が直前の変更に起因するか
+- どのサブシステムを先に調べるべきか
+- 変更に追加のレビューやテストが必要か
+- 提供した実行履歴から、作業が進んでいるか、同じ試行を繰り返しているか
+
+サーバー自身はリポジトリのファイルを読んだり、実行履歴を収集したりしません。判断材料は呼び出し側が `state` として渡します。
+
+## 必要なもの
+
+- Rust 1.88 以上
+- TypeSafe API キー
+- Codex など、stdio 接続に対応した MCP クライアント
+
+API キーは [TypeSafe のコンソール](https://console.typesafe.ai/) で取得します。評価時には TypeSafe API を呼び出すため、利用に応じた料金が発生する場合があります。
+
+## ビルド
 
 ```sh
 cargo build --release --locked
 ```
 
-The executable is `target/release/jev-mcp`. It speaks newline-delimited MCP JSON-RPC on stdin/stdout using the official Rust MCP SDK. Your MCP client launches it; running it in a terminal waits for protocol messages.
+実行ファイルは `target/release/jev-mcp` に生成されます。
 
-For Codex, add this to `~/.codex/config.toml`, replacing the executable path:
+通常は MCP クライアントがこの実行ファイルを起動します。ターミナルから直接起動した場合は、標準入力から MCP メッセージが届くまで待機します。
+
+## Codex に接続する
+
+`~/.codex/config.toml` に次の設定を追加します。`command` は、ビルドした実行ファイルの絶対パスに置き換えてください。すでに `[mcp_servers.jev]` がある場合は、既存の設定を更新します。
+
+```toml
+[mcp_servers.jev]
+command = "/absolute/path/to/jev-mcp/target/release/jev-mcp"
+tool_timeout_sec = 70
+
+[mcp_servers.jev.env]
+TYPESAFE_API_KEY = "your_typesafe_api_key"
+```
+
+`your_typesafe_api_key` を実際の API キーに置き換えて保存し、Codex を再起動してください。キーを記載した設定ファイルは Git にコミットしないでください。
+
+環境変数として管理する場合は、上の設定の代わりに次を使えます。
 
 ```toml
 [mcp_servers.jev]
@@ -29,240 +75,68 @@ env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_MODEL"]
 tool_timeout_sec = 70
 ```
 
-Set `TYPESAFE_API_KEY` in the environment of the process launching Codex, then restart the client. GUI applications may not inherit your terminal environment. The server reads configuration at startup; it does not load `.env` files. See the [official Codex MCP configuration documentation](https://developers.openai.com/codex/mcp/).
+この場合、Codex を起動するプロセスの環境に `TYPESAFE_API_KEY` を設定します。GUI アプリはターミナルの環境変数を引き継がない場合があります。
 
-| Environment variable | Behavior |
+サーバーは起動時に環境変数を読み込みます。**`.env` ファイルの自動読み込みには対応していません。** 設定方法の詳細は [Codex の公式 MCP ドキュメント](https://developers.openai.com/codex/mcp/) を参照してください。
+
+### 環境変数
+
+| 名前 | 説明 |
 | --- | --- |
-| `TYPESAFE_API_KEY` | Bearer credential. Missing or blank keys allow tool discovery, but evaluation returns a tool error. |
-| `TYPESAFE_MODEL` | Default model, `jev-latest` when omitted. A tool's optional `model` overrides it. |
+| `TYPESAFE_API_KEY` | API 認証に使う Bearer トークン。未設定・空でもツール一覧は取得できますが、評価時にエラーを返します。 |
+| `TYPESAFE_MODEL` | 既定のモデル。省略時は `jev-latest`。各ツールの `model` 引数で上書きできます。 |
 
-All four tools send the supplied state and questions to `https://api.typesafe.ai/v1/systemone`. They do not read repository files or collect agent traces themselves. The caller supplies the evidence to evaluate. API use may incur TypeSafe charges.
+## ツールの使い方
 
-The client has a 10-second connection timeout, a 30-second per-attempt timeout, and a 60-second total deadline. HTTP 429 and 529 retry at most twice with 0.5/1-second backoff, or the server's `Retry-After` delay in seconds. Other HTTP errors and transport errors are returned without retries. Redirects are disabled and responses are capped at 8 MiB.
+### 共通仕様
 
-Input validation, missing credentials, API errors, and malformed answers return MCP tool results with `isError: true`. Unknown tool names return a JSON-RPC error. Remote error bodies and credentials are not included in errors. Stdout is reserved for MCP messages.
+- `state`：評価する情報。文字列、オブジェクト、配列を指定できます。
+- `instructions`：質問または判定したい条件。文字列、オブジェクト、配列を指定できます。
+- `model`：任意のモデル指定。省略時はサーバーの既定値を使います。
+- `criteria`：Choice では選択肢のマップ、Score では順序付きの評価基準、Noul では任意の Yes／No の説明です。
 
-## Tool arguments and results
+未定義の引数はエラーになります。入力形式は [TypeSafe API リファレンス](https://docs.typesafe.ai/api) に基づきます。
 
-| Tool | Required arguments | Optional arguments | Answer |
-| --- | --- | --- | --- |
-| `jev.noul` | `state`, `instructions` | `criteria` with `true`/`false` descriptions, `model` | Probability of yes in `noul` (0–1). |
-| `jev.choice` | `state`, `instructions`, `criteria` map with 1–255 named options | `model` | `choice`, `probabilities`, `confidence`. |
-| `jev.score` | `state`, `instructions`, `criteria` array of 2–10 ordered descriptions | `model` | `score`, `legend`, `probabilities`, `confidence`. |
-| `jev.batch` | `state`, nonempty `questions` map | `model` | One answer per question ID. |
+成功時は `model`、`answers`、`usage` を含む API 応答を返します。MCP の `structuredContent` に加え、`content` にも同じ内容を JSON 文字列で含めます。
 
-`state` and `instructions` accept strings, objects, or arrays. Choice descriptions accept those forms or `null`; Score levels accept strings, objects, or arrays. Unknown argument fields are rejected. Input types follow the [TypeSafe API reference](https://docs.typesafe.ai/api).
+単発ツールの回答は `answers.result` に入ります。`jev.batch` は呼び出し側が指定した質問 ID を維持します。
 
-Every successful tool returns the API envelope (`model`, `answers`, `usage`) in MCP `structuredContent` and as JSON text in `content`. Single tools place their answer at `answers.result`; batch preserves your question IDs. A Score uses zero-based level positions, so three levels produce a value from 0 to 2, including fractions. A Noul near 0 is a strong no, near 1 a strong yes, and near 0.5 uncertain; it has no separate `confidence`.
+以下の JSON はツールの引数です。MCP の `tools/call` メッセージへの組み込みはクライアントが行います。
 
-Prefer `jev.batch` for independent questions sharing the same state. These are tool arguments (the MCP client supplies the `tools/call` envelope):
+### Yes／No の判定：`jev.noul`
 
 ```json
 {
-  "state": {
-    "diff": "A worker retry limit changed from 3 to 0.",
-    "test_failure": "worker_retries_transient_failure: expected 3 attempts, got 1"
-  },
-  "questions": {
-    "related": {
-      "type": "noul",
-      "instructions": "Is test_failure related to diff?"
-    },
-    "subsystem": {
-      "type": "choice",
-      "instructions": "Which subsystem should be investigated first?",
-      "criteria": {
-        "worker": "Background execution and retries",
-        "api": "HTTP request handling",
-        "unknown": "Insufficient evidence"
-      }
-    },
-    "impact": {
-      "type": "score",
-      "instructions": "How severely does diff affect retry behavior?",
-      "criteria": [
-        "Retry behavior is unchanged",
-        "Some retry scenarios fail but retries still occur",
-        "Retries are disabled entirely"
-      ]
-    }
-  }
+  "state": "テストは成功しました。",
+  "instructions": "テストが成功したと明記されていますか？"
 }
 ```
 
-Questions in a batch cannot consume each other's answers. If a question needs an earlier result, make a later call with that result included in its state.
+回答の `noul` は Yes の確率です。
 
-## Development
+- 1 に近い：強い Yes
+- 0 に近い：強い No
+- 0.5 に近い：判断が不確か
 
-```sh
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-```
+Noul に独立した `confidence` はありません。必要に応じて `criteria` に `true` と `false` の説明を指定できます。
 
-Tests use a local mock HTTP server and an actual stdio subprocess; no TypeSafe key or paid API calls are needed. Live model quality and latency require separate evaluation with real credentials and representative data.
+### 選択肢から選ぶ：`jev.choice`
 
-```text
-                ┌──────────────┐
-                │    Codex     │
-                │ planner/actor│
-                └──────┬───────┘
-                       │
-                  small decision
-                       │
-                ┌──────▼───────┐
-                │     Jev      │
-                │ decision layer│
-                └──────┬───────┘
-                       │
-             typed / scored result
-                       │
-                ┌──────▼───────┐
-                │    Codex     │
-                │ edit/test/run│
-                └──────────────┘
-```
-
-## Why?
-
-Coding agents make a surprisingly large number of small decisions during a task.
-
-For example:
-
-* Is this file relevant to the current bug?
-* Is this test failure related to the latest change?
-* Which subsystem is the most likely source of the problem?
-* Is this warning worth investigating now?
-* Which hypothesis should be tested next?
-* Does this diff look risky?
-* Is the agent still making progress?
-
-These decisions often do not require another large generative reasoning step.
-
-They are closer to:
-
-```text
-yes / no
-```
-
-```text
-A / B / C / D
-```
-
-or:
-
-```text
-risk = 0.82
-```
-
-`jev-mcp` exposes these kinds of decisions as MCP tools that Codex can call during a task.
-
-## Concept
-
-The goal is not to replace Codex with Jev.
-
-The goal is to let each system do the kind of work it is best suited for.
-
-### Codex
-
-Use Codex for:
-
-* repository exploration
-* architecture and design
-* code generation
-* refactoring
-* debugging
-* shell operations
-* test execution
-* multi-step reasoning
-* explaining results
-
-### Jev
-
-Use Jev for:
-
-* binary decisions
-* classification
-* candidate selection
-* relevance filtering
-* prioritization
-* risk scoring
-* confidence-based routing
-* large batches of small decisions
-
-In other words:
-
-> Codex handles the reasoning loop.
-> Jev handles the decision nodes inside that loop.
-
-## Example
-
-A normal debugging workflow might look like this:
-
-```text
-User
-  │
-  ▼
-Codex
-  │
-  ├─ inspect error
-  ├─ inspect repository
-  │
-  ▼
-Jev
-  │
-  ├─ worker       0.71
-  ├─ scheduler    0.19
-  ├─ database     0.06
-  ├─ api          0.03
-  └─ frontend     0.01
-  │
-  ▼
-Codex
-  │
-  ├─ investigate worker
-  ├─ modify code
-  └─ run tests
-       │
-       ▼
-      Jev
-       │
-       └─ regression related? → 0.93
-       │
-       ▼
-     Codex
-       │
-       └─ continue / finish
-```
-
-## MCP interface
-
-The initial API is intentionally small.
-
-```text
-jev.noul
-jev.choice
-jev.score
-jev.batch
-```
-
-For example, arguments to `jev.choice`:
+`criteria` は1〜255個の選択肢を持つマップです。説明には文字列、オブジェクト、配列を使えます。説明が不要な場合は `null` を指定します。
 
 ```json
 {
-  "state": "...repository state...",
-  "instructions": "Which subsystem most likely contains the bug?",
+  "state": "ワーカーの再試行回数を変更した後、ジョブの再試行テストが失敗しました。",
+  "instructions": "最初に調べるべきサブシステムはどれですか？",
   "criteria": {
-    "api": null,
-    "scheduler": null,
-    "worker": null,
-    "database": null,
-    "frontend": null
+    "worker": "ジョブの実行と再試行を担当する部分",
+    "api": "HTTP リクエストを処理する部分",
+    "unknown": "判断に必要な情報が不足している"
   }
 }
 ```
 
-Illustrative `structuredContent` result (values are examples):
+返却形式の例です。数値は説明用であり、実測値ではありません。
 
 ```json
 {
@@ -272,127 +146,141 @@ Illustrative `structuredContent` result (values are examples):
       "type": "choice",
       "choice": "worker",
       "probabilities": {
-        "worker": 0.71,
-        "scheduler": 0.19,
-        "database": 0.06,
-        "api": 0.03,
-        "frontend": 0.01
+        "worker": 0.9,
+        "api": 0.05,
+        "unknown": 0.05
       },
-      "confidence": 0.5
+      "confidence": 0.75
     }
   },
   "usage": { "input_tokens": 200, "output_tokens": 30 }
 }
 ```
 
-The important part is that Jev is not being used to generate prose.
+選択肢だけではすべての状況を扱えない場合は、`unknown` や `other` に相当する選択肢を含めてください。
 
-It is being used as a typed decision primitive.
+### 評価基準に沿って採点する：`jev.score`
 
-## Confidence-based escalation
+`criteria` に、低い段階から高い段階への順で2〜10個の評価基準を指定します。各段階は文字列、オブジェクト、配列で記述できます。
 
-Jev does not need to make every decision autonomously.
+```json
+{
+  "state": "CSV 出力が失敗します。JSON 出力は利用できます。",
+  "instructions": "報告された不具合の深刻度を評価してください。",
+  "criteria": [
+    "表示上の問題のみで、機能への影響はない",
+    "機能の一部が使えないが、代替手段がある",
+    "主要な作業ができず、代替手段もない"
+  ]
+}
+```
 
-A workflow can escalate uncertain decisions back to Codex.
+`score` は各段階の番号を確率で重み付けした値です。番号は0から始まるため、3段階なら0〜2の範囲となり、小数も返ります。常に0〜1の確率を返すわけではありません。
 
-For example:
+回答には、段階番号と説明を対応させる `legend`、各段階の `probabilities`、分布から算出した `confidence` も含まれます。
+
+### 複数の質問をまとめる：`jev.batch`
+
+同じ `state` に対する独立した質問は、`jev.batch` にまとめてください。Noul、Choice、Score を1回の API リクエストに混在させられます。`questions` には少なくとも1件の質問が必要です。
+
+```json
+{
+  "state": {
+    "diff": "ワーカーの再試行上限を3回から0回に変更した。",
+    "test_failure": "worker_retries_transient_failure: expected 3 attempts, got 1"
+  },
+  "questions": {
+    "related": {
+      "type": "noul",
+      "instructions": "`test_failure` は `diff` に関係していますか？"
+    },
+    "subsystem": {
+      "type": "choice",
+      "instructions": "最初に調べるべきサブシステムはどれですか？",
+      "criteria": {
+        "worker": "バックグラウンド実行と再試行",
+        "api": "HTTP リクエストの処理",
+        "unknown": "判断材料が不足している"
+      }
+    },
+    "impact": {
+      "type": "score",
+      "instructions": "`diff` が再試行の動作に与える影響を評価してください。",
+      "criteria": [
+        "再試行の動作は変わらない",
+        "一部の条件で再試行に失敗するが、再試行自体は行われる",
+        "再試行が完全に無効になる"
+      ]
+    }
+  }
+}
+```
+
+回答は `answers.related`、`answers.subsystem`、`answers.impact` に入ります。
+
+バッチ内の質問は互いの回答を参照できません。前の回答が次の判断に必要な場合は、その回答を新しい `state` に含めて別の呼び出しを行います。
+
+## 不確かな結果の扱い
+
+Choice と Score の `confidence` は、回答の確率分布から算出される指標です。正解を保証する値ではありません。
+
+呼び出し側では、たとえば次のような分岐を設けられます。
 
 ```text
 confidence >= 0.90
-    → accept Jev decision
+    → Jev の判断を採用する
 
 0.60 <= confidence < 0.90
-    → let Codex inspect the result
+    → Codex が結果を確認する
 
 confidence < 0.60
-    → gather more evidence and retry
+    → 判断材料を追加して再評価する
 ```
 
-This keeps cheap decisions cheap while preserving deeper reasoning when it is actually needed.
+このしきい値は設計例です。サーバーは自動採用や再評価を強制しません。用途と実際の評価データに合わせて調整してください。Noul では Yes の確率に基づく別の基準が必要です。
 
-These thresholds illustrate a caller policy; the server does not enforce them. They apply to Choice/Score confidence, which describes the answer distribution rather than guaranteeing correctness. Calibrate thresholds on your own data. Noul requires a separate policy based on its yes probability. See [TypeSafe confidence](https://docs.typesafe.ai/confidence).
+詳しくは [TypeSafe の Confidence ドキュメント](https://docs.typesafe.ai/confidence) を参照してください。
 
-## Possible use cases
+## 通信とエラー処理
 
-### File relevance
-
-Before reading dozens of candidate files:
+すべてのツールは、渡された情報と質問を次のエンドポイントへ送信します。
 
 ```text
-Is this file relevant to the current task?
+POST https://api.typesafe.ai/v1/systemone
 ```
 
-### Test failure triage
+| 項目 | 動作 |
+| --- | --- |
+| 接続タイムアウト | 10秒 |
+| 1回のリクエストのタイムアウト | 30秒 |
+| 再試行を含む全体の制限時間 | 60秒 |
+| HTTP 429／529 | 最大2回再試行。通常は0.5秒、1秒と待機時間を増やす。秒数形式の `Retry-After` があれば従う。全体の制限時間は維持する。 |
+| その他の HTTP エラー・通信エラー | 再試行せずにエラーを返す |
+| リダイレクト | 追従しない |
+| 応答サイズ | 最大8 MiB |
 
-Classify failures as:
+入力の不備、キーの未設定、API エラー、不正な回答は `isError: true` の MCP ツール結果として返します。未知のツール名には JSON-RPC エラーを返します。
 
-```text
-regression
-unrelated
-flaky
-unknown
+API のエラー本文や認証情報はエラーメッセージに含めません。標準出力は MCP メッセージ専用です。
+
+## 開発とテスト
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
 
-### Hypothesis routing
+テストではローカルのモック HTTP サーバーと、実際の stdio 子プロセスを使用します。TypeSafe の API キーや有料 API 呼び出しは不要です。
 
-Given several debugging hypotheses, select which one should be investigated next.
+確認対象には、各ツールのリクエスト形式、混合バッチの MCP 通信、入力検証、認証エラー、再試行、タイムアウト、不正・過大な応答、stdio の初期化と終了が含まれます。
 
-### Diff risk scoring
+実モデルの判断品質、費用、応答時間は、実際の API キーと用途に合ったデータで別途評価する必要があります。
 
-Estimate whether a change deserves additional review or testing.
+## 設計方針と実装状況
 
-### Agent trace monitoring
+Codex は調査・実装・検証を進め、Jev はその途中の小さな判断を担当します。質問は1つの判断に絞り、複数の観点が必要なら分けて評価し、呼び出し側のコードで結果を組み合わせます。
 
-Jev can also observe the Codex execution trace itself.
+現在は実験段階です。4つの stdio MCP ツール、TypeSafe API との接続、入力・応答の検証、再試行とタイムアウト、モックおよびプロトコルのテストを実装しています。
 
-```text
-progressing?
-stuck?
-repeating?
-risky?
-```
-
-This makes it possible to use Jev not only inside the coding workflow, but also as a lightweight observer of the coding agent.
-
-## Design philosophy
-
-Large language models are extremely capable, but not every decision needs full generative reasoning.
-
-A coding agent may perform hundreds of tiny judgments while completing a single task.
-
-This project explores a simple idea:
-
-> Use a powerful reasoning model for difficult decisions, and a fast typed decision model for everything else.
-
-Instead of treating Jev as a smaller replacement for an LLM, treat it as a primitive that can appear many times inside an agent's reasoning graph.
-
-```text
-Codex → Jev → Codex → Jev → Codex
-```
-
-The interesting question is not whether Jev can replace Codex.
-
-The interesting question is:
-
-> How much reasoning can Codex avoid doing without reducing the quality of the final result?
-
-## Status
-
-Experimental. The four stdio MCP tools, TypeSafe HTTP integration, validation, bounded retries, and mock/protocol tests are implemented. The workflows below are intended applications; automated repository inspection, trace collection, and measured cost/quality improvements are not implemented.
-
-The first targets are:
-
-* test failure triage
-* file relevance filtering
-* next-hypothesis selection
-* diff risk scoring
-* Codex trace monitoring
-
-The project will measure whether Jev-assisted workflows can reduce:
-
-* token usage
-* unnecessary repository reads
-* redundant reasoning
-* agent latency
-
-while preserving or improving task completion quality.
+リポジトリの自動調査やエージェントの実行履歴収集は未実装です。また、Jev を組み込むことでトークン使用量、不要なファイル読み込み、重複した推論、待ち時間がどれだけ減るかは、今後の検証対象です。最終的なタスクの達成品質を維持できるかも含めて評価します。
