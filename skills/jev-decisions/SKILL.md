@@ -28,6 +28,7 @@ description: "Jev MCP を使い、コーディング作業の判断材料を分�
 - 修正を提出する前に、再現・因果・検証・回帰・影響範囲の証拠がそろっているか確認する場合は [references/evidence-sufficiency.md](references/evidence-sufficiency.md) を読む。
 - 呼び出し側が収集した短い作業履歴から、進展・行き詰まり・反復・検証準備を評価する場合は [references/trace-monitoring.md](references/trace-monitoring.md) を読む。
 - 長い作業履歴から、次の判断に必要なツール結果や観測を選ぶ場合は [references/context-selection.md](references/context-selection.md) を読む。
+- 操作の意図・対象・影響や実行後の観測から、追加の安全確認が必要か助言を得る場合は [references/safety-advisory.md](references/safety-advisory.md) を読む。
 
 ## 質問の組み立て
 
