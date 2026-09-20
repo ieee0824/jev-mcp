@@ -288,6 +288,8 @@ TYPESAFE_API_KEY="your_typesafe_api_key" cargo run --locked -- eval run tests/fi
 
 stdout にはケースごとの JSON と、最後に `type: "summary"` の集計を出力します。ケース結果には ID、`pass` / `fail` / `error`、実測値、解決されたモデル、所要時間、トークン使用量が含まれます。期待値の不一致は `fail`、通信やAPIの失敗は `error` として区別され、途中のエラー後も残りのケースを実行します。API キーと送信した `state` は出力しません。
 
+日本語のコーディング判断を回帰確認するための12件の架空ケースを [`eval/ja-coding-minimal.jsonl`](eval/ja-coding-minimal.jsonl) に同梱しています。用途、検証方法、実測ベースラインの保存方法、結果の限界は [`eval/README.md`](eval/README.md) を参照してください。
+
 ## 通信とエラー処理
 
 すべてのツールは、渡された情報と質問を次のエンドポイントへ送信します。
