@@ -1,64 +1,64 @@
-# 危険操作の助言的評価
+# Advisory Assessment of Risky Operations
 
-操作の説明に曖昧さがあり、既存の権限確認に加えて注意点を整理したいときに使う。Jevの回答は追加の注意信号であり、OSやMCPクライアントの権限、サンドボックス、ユーザー確認、承認手順を置き換えない。Jevは操作を許可、拒否、実行しない。
+Use this recipe when an operation is ambiguous and an additional assessment could clarify which risks need attention before or after existing permission checks. Jev's response is an advisory signal. It does not replace OS or MCP-client permissions, sandboxing, user confirmation, or approval procedures. Jev cannot authorize, deny, or execute an operation.
 
-## 操作前と操作後を分ける
+## Separate pre-operation intent from post-operation observation
 
-操作前は、予定している意図、対象、データの範囲、外部との境界、想定する影響、復旧方法だけを `state` にする。次の観点を独立した質問として1回の Batchで評価する。
+Before the operation, put only the planned intent, target, data scope, external boundary, expected impact, and recovery method in `state`. Assess these dimensions independently in one Batch:
 
-- 読み取りだけで状態を変更しない操作か。
-- 変更がある場合、完全かつ現実的に取り消せるか。
-- データやメッセージを外部へ送信するか。
-- ファイル、履歴、リソースを削除または復元困難に上書きするか。
+- Whether the operation is read-only and changes no state.
+- Whether every change is fully and realistically reversible.
+- Whether it transmits data or a message to an external party.
+- Whether it deletes or irrecoverably overwrites files, history, or resources.
 
-操作後は同じ予定を再利用せず、実際に実行した操作、終了状態、変更された対象、外部応答、復旧可能性を新しい `state` にする。予定と実測の差、想定外の変更、未確認の影響を独立に評価する。
+After the operation, do not reuse the plan as though it were observed fact. Build a new `state` from the operation actually executed, its exit state, changed targets, external response, and observed recoverability. Assess divergence from intent, unexpected changes, and unverified impact independently.
 
-## 操作前の例
+## Pre-operation example
 
 ```json
 {
   "state": {
     "phase": "before",
-    "intent": "作業ブランチの差分を共有するため、GitHubに新しいPRを作る。",
-    "target": "現在のリポジトリの作業ブランチとPR本文。",
-    "planned_actions": ["ブランチをpushする", "GitHub APIでPRを作成する"],
-    "data_scope": "コミット済みの差分、ブランチ名、PR本文。",
-    "recovery": "PRは閉じられる。push済みコミットはリモートに残る。"
+    "intent": "Create a GitHub pull request to share the working branch diff.",
+    "target": "The current repository's working branch and pull request body.",
+    "planned_actions": ["Push the branch", "Create a pull request through the GitHub API"],
+    "data_scope": "Committed diff, branch name, and pull request body.",
+    "recovery": "The pull request can be closed; pushed commits remain on the remote."
   },
   "questions": {
     "read_only": {
       "type": "noul",
-      "instructions": "この操作は、ローカルと外部サービスのどちらの状態も変更しない読み取り専用操作ですか？"
+      "instructions": "Is this a read-only operation that changes neither local state nor external-service state?"
     },
     "reversible": {
       "type": "noul",
-      "instructions": "予定されるすべての状態変更は、記載された `recovery` によって完全かつ現実的に元へ戻せますか？"
+      "instructions": "Can every planned state change be fully and realistically reversed by the stated `recovery` method?"
     },
     "external_send": {
       "type": "noul",
-      "instructions": "`planned_actions` は、`data_scope` の情報をGitHubという外部サービスへ送信しますか？"
+      "instructions": "Do `planned_actions` transmit the information in `data_scope` to the external GitHub service?"
     },
     "deletion": {
       "type": "noul",
-      "instructions": "`planned_actions` は、ファイル、履歴、ブランチ、または外部リソースを削除するか、復元困難に上書きしますか？"
+      "instructions": "Do `planned_actions` delete or irrecoverably overwrite files, history, branches, or external resources?"
     }
   }
 }
 ```
 
-この例で `external_send` が高くても、それ自体が禁止や許可を意味しない。呼び出し側は、ユーザーの依頼がpushとPR作成を許可しているか、送信内容が意図した範囲かを既存の承認手順で確認する。
+A high `external_send` result in this example is neither permission nor prohibition. The caller must use the existing approval process to confirm that the user authorized the push and PR creation and that the outbound content matches the intended scope.
 
-## 操作後の例
+## Post-operation example
 
 ```json
 {
   "state": {
     "phase": "after",
-    "intended": ["作業ブランチをpushする", "新しいPRを1件作る"],
+    "intended": ["Push the working branch", "Create one pull request"],
     "observed": {
-      "command_status": "成功",
-      "changed_targets": ["リモート作業ブランチ", "PR #24"],
-      "external_response": "PR URLを受信した。",
+      "command_status": "success",
+      "changed_targets": ["remote working branch", "pull request #24"],
+      "external_response": "Received the pull request URL.",
       "deletions": [],
       "unexpected": []
     }
@@ -66,22 +66,22 @@
   "questions": {
     "matches_intent": {
       "type": "noul",
-      "instructions": "`observed.changed_targets` と `external_response` は `intended` の範囲内で、予定した操作だけが実行されたことを示していますか？"
+      "instructions": "Do `observed.changed_targets` and `external_response` show that only the operations within `intended` were performed?"
     },
     "unexpected_change": {
       "type": "noul",
-      "instructions": "`observed` は、予定になかった外部送信、状態変更、削除、または復元困難な影響を示していますか？"
+      "instructions": "Does `observed` show any unplanned external transmission, state change, deletion, or hard-to-reverse impact?"
     },
     "needs_follow_up": {
       "type": "noul",
-      "instructions": "`observed` には、結果を完了とする前に追加確認または復旧が必要な未確認の影響がありますか？"
+      "instructions": "Does `observed` contain any unverified impact that requires further checking or recovery before considering the result complete?"
     }
   }
 }
 ```
 
-## 不確かさとエラー
+## Uncertainty and errors
 
-確率が拮抗する、Noulが0.5付近になる、必要な対象情報が欠ける、またはAPIエラーになる場合は、安全と自動判定しない。操作前なら対象と影響を調査し、必要な権限確認やユーザー確認へ戻る。操作後なら追加の読み取り確認を行い、想定外の変更が疑われる場合はそれ以上の変更を止めて事実を確認する。
+When probabilities are close, a Noul value is near 0.5, target information is missing, or the API returns an error, never default to automatic authorization. Before an operation, investigate the target and impact and return to any required permission or user-confirmation step. After an operation, perform read-only checks; if an unexpected change is possible, stop further mutation until the facts are known.
 
-Jevの低リスク評価も、明示的な許可が必要な操作を許可しない。高リスク評価も事実確認なしに対象を削除・巻き戻す許可にはならない。最終行動は、実際の権限、ユーザーの指示、サンドボックス、承認結果に従って呼び出し側が決める。
+A low-risk assessment does not authorize an operation that requires explicit permission. A high-risk assessment does not authorize deletion or rollback without factual verification. The caller makes the final decision from actual permissions, user instructions, sandbox boundaries, and approval results.

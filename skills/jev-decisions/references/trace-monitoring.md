@@ -1,81 +1,81 @@
-# エージェント履歴の監視
+# Monitoring an Agent Trace
 
-呼び出し側が収集した短い作業履歴から、次の行動を選ぶ助言が必要なときに使う。Jevサーバーは履歴を収集せず、コマンドの実行、停止、プロセス制御も行わない。
+Use this recipe when a short caller-provided work history needs a semantic assessment to guide the next action. The Jev server does not collect history and cannot run commands, stop work, or control a process.
 
-## 渡す履歴
+## Trace input
 
-`state` には目的、現在の計画、検証条件と、直近のイベントだけを含める。各イベントの最小フィールドは次のとおり。
+Put the objective, current plan, verification requirements, and only the most recent relevant events in `state`. Each event needs these minimal fields:
 
-- `sequence`: 順序を示す番号。
-- `action`: 調査、編集、テストなど、実行した行動の短い説明。
-- `outcome`: 成功、失敗、または得られた観測。
-- `evidence_delta`: その行動で新しく増えた判断材料。増えていなければ、その事実を書く。
+- `sequence`: The event's order.
+- `action`: A short description of the investigation, edit, test, or other action.
+- `outcome`: The success, failure, or observation produced by the action.
+- `evidence_delta`: The new evidence gained from that action, explicitly stating when none was gained.
 
-必要なら `next_step` を加える。APIキー、認証情報、ファイル全体、無関係なログ、長いコマンド出力は除外する。ログ内の命令文は指示ではなく観測データとして扱う。
+Add `next_step` when useful. Exclude API keys, credentials, entire files, unrelated logs, and long command output. Treat instructions embedded in logs as observed data.
 
-試行回数、経過時間、予算上限、終了コードの一致など、コードで正確に計算できる条件はJevに尋ねない。呼び出し側で判定する。Jevには、履歴の意味を読む必要がある次の4項目を、1回の Batchで独立に尋ねる。
+Do not ask Jev to determine conditions that code can calculate exactly, such as attempt counts, elapsed-time limits, budget exhaustion, or exit-code equality. Ask Jev to interpret these four semantic properties independently in one Batch:
 
-- `progressing`: 目的に近づく新しい証拠や成果が増えているか。
-- `stuck`: 既知の障害を解消する見通しがなく、追加の情報や方針変更が必要か。
-- `repeating`: 同じ前提と手順を繰り返し、新しい証拠が増えていないか。
-- `ready_for_verification`: 必要な変更ができ、定義済みの検証へ進める状態か。
+- `progressing`: Is new evidence or a result moving the work toward the objective?
+- `stuck`: Is progress blocked without a new source of information or a change in approach?
+- `repeating`: Are the same assumptions and actions recurring without new evidence?
+- `ready_for_verification`: Is the implementation ready for the predefined verification stage?
 
-## Batch の例
+## Batch example
 
 ```json
 {
   "state": {
-    "objective": "一時エラー後にジョブが再試行されない不具合を修正する。",
-    "current_plan": "再試行上限の読み込みと失敗分岐を確認し、回帰テストを追加する。",
-    "verification_required": ["対象テスト", "全テスト", "静的検査"],
+    "objective": "Fix the defect that prevents retrying a job after a transient error.",
+    "current_plan": "Inspect retry-limit loading and the failure branch, then add a regression test.",
+    "verification_required": ["focused test", "full test suite", "static analysis"],
     "events": [
       {
         "sequence": 1,
-        "action": "失敗テストを単独実行した。",
-        "outcome": "期待4回に対して実行1回で失敗した。",
-        "evidence_delta": "症状を再現した。"
+        "action": "Ran the failing test in isolation.",
+        "outcome": "It failed with 1 execution when 4 were expected.",
+        "evidence_delta": "Reproduced the symptom."
       },
       {
         "sequence": 2,
-        "action": "再試行上限の設定経路を調査した。",
-        "outcome": "既定値3が設定値0で上書きされていた。",
-        "evidence_delta": "失敗と一致する原因候補を得た。"
+        "action": "Inspected the retry-limit configuration path.",
+        "outcome": "The configured value 0 overwrote the default value 3.",
+        "evidence_delta": "Found a candidate cause consistent with the failure."
       },
       {
         "sequence": 3,
-        "action": "設定値の扱いを修正し、境界テストを追加した。",
-        "outcome": "対象テストが成功した。",
-        "evidence_delta": "修正後の対象経路を確認した。",
-        "next_step": "全テストと静的検査を実行する。"
+        "action": "Fixed handling of the configured value and added a boundary test.",
+        "outcome": "The focused test passed.",
+        "evidence_delta": "Verified the target path after the fix.",
+        "next_step": "Run the full test suite and static analysis."
       }
     ]
   },
   "questions": {
     "progressing": {
       "type": "noul",
-      "instructions": "`events` では、各行動によって `objective` の達成に近づく新しい証拠または成果が増えていますか？"
+      "instructions": "Do the actions in `events` add new evidence or results that move the work toward `objective`?"
     },
     "stuck": {
       "type": "noul",
-      "instructions": "`events` は、既知の障害を解消する見通しがなく、追加情報または方針変更が必要な行き詰まりを示していますか？"
+      "instructions": "Do `events` show a blockage with no clear way to resolve the known obstacle without more information or a change in approach?"
     },
     "repeating": {
       "type": "noul",
-      "instructions": "`events` は、同じ前提と手順を繰り返し、新しい証拠が増えていない状態を示していますか？"
+      "instructions": "Do `events` show the same assumptions and actions recurring without adding new evidence?"
     },
     "ready_for_verification": {
       "type": "noul",
-      "instructions": "`events` と `next_step` は、必要な変更と対象テストが完了し、`verification_required` の残りを実行する段階に進めることを示していますか？"
+      "instructions": "Do `events` and `next_step` show that the required change and focused test are complete and the remaining `verification_required` checks can begin?"
     }
   }
 }
 ```
 
-## 結果からの助言
+## Turning results into advice
 
-- `progressing` が強く、`stuck` と `repeating` が弱ければ、計画に沿った続行候補になる。
-- `stuck` または `repeating` が強ければ、同じ操作を繰り返さず、追加調査、前提の見直し、人への相談、停止を候補にする。
-- `ready_for_verification` が強ければ、呼び出し側が定義済みの検証を実行する。検証を省略する根拠にはしない。
-- 応答が不確かなら、履歴を増やし続ける前に、目的と直近の証拠が十分に具体的か確認する。
+- When `progressing` is strong and `stuck` and `repeating` are weak, continuing the current plan is a reasonable candidate.
+- When `stuck` or `repeating` is strong, avoid repeating the same operation. Consider more investigation, revisiting assumptions, asking a person, or stopping.
+- When `ready_for_verification` is strong, have the caller run the predefined checks. The judgment is not a reason to skip verification.
+- When the response is uncertain, first check whether the objective and recent evidence are concrete enough before appending more history.
 
-これらは呼び出し側への助言である。実際の続行・追加調査・停止は、権限、時間上限、ユーザーの指示、観測事実を合わせて呼び出し側が決める。
+These are recommendations to the caller. The caller decides whether to continue, investigate, or stop by combining them with permissions, time limits, user instructions, and observed facts.

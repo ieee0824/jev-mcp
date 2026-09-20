@@ -1,46 +1,46 @@
-# 障害仮説の順位付け
+# Ranking Incident Hypotheses
 
-複数の原因仮説から、次に実行する診断を選ぶときに使う。仮説の生成は Codex、現在の証拠に基づく順位付けは Jev、診断の実行と最終的な原因の確定は Codex が担当する。
+Use this recipe to select the next diagnostic from several possible causes. Codex generates the hypotheses, Jev ranks them against the current evidence, and Codex performs diagnostics and determines the final cause.
 
-## 手順
+## Procedure
 
-1. ログ、差分、再現結果から、互いに区別できる原因仮説を Codex が作る。各仮説について、成立した場合に観測される事実と反証できる診断も用意する。
-2. 同時に成立し得る仮説は、仮説ごとの Noul を1回の Batchにまとめる。段階評価が診断順の決定に適する場合は、同じ段階定義を持つ仮説ごとの Score を使う。排他的だと確認できた分類だけ Choice を使う。
-3. 回答の確率またはスコアと、診断の費用・安全性を合わせて次の診断を選ぶ。順位だけで原因を確定しない。
-4. 上位仮説を区別できるテストや観測を実行し、その結果で仮説を棄却または支持する。原因の結論は診断結果に基づいて出す。
-5. すべての Noul が低い、結果が拮抗する、仮説を区別する証拠がない、または診断結果が上位仮説と矛盾する場合は、候補内に真因がない可能性を扱う。追加のログや再現条件を集め、Codex が仮説集合を作り直してから再評価する。
+1. From logs, diffs, and reproduction results, have Codex form hypotheses that can be distinguished from one another. For each hypothesis, identify the expected observation and a diagnostic that could refute it.
+2. When several hypotheses may be true at once, put one Noul question per hypothesis in a single Batch. If ordered diagnostic priority is more useful, ask one Score question per hypothesis with identical levels. Use Choice only after confirming that the categories are mutually exclusive.
+3. Select the next diagnostic by combining the returned probabilities or scores with the diagnostic's cost and safety. Do not establish a cause from ranking alone.
+4. Run a test or observation that distinguishes the leading hypothesis, then use the observed result to reject or support it. Base the final conclusion on the diagnostic evidence.
+5. Return to evidence gathering and generate a new hypothesis set when all Noul values are low, results are close or uncertain, the hypotheses cannot be distinguished with current evidence, or a diagnostic contradicts the leading hypothesis. These are signals that the true cause may be absent from the candidate set.
 
-しきい値を使う場合は、プロジェクトで検証した値にする。固定値を原因確定の条件にはしない。
+When thresholds are useful, use values validated for the project. Never use a fixed threshold as proof of causality.
 
-## Batch の例
+## Batch example
 
-次の例では、同じ証拠に対して各仮説が成立するかを独立に評価する。質問IDだけに依存せず、各 `instructions` に仮説と判定条件を完全に書く。
+This example evaluates each hypothesis independently against the same evidence. Each `instructions` field states the complete hypothesis and condition rather than relying on the question ID.
 
 ```json
 {
   "state": {
-    "change": "ワーカーの再試行上限を3回から0回に変更した。",
-    "failure": "一時エラー後の実行回数が1回だった。期待値は4回。",
+    "change": "Changed the worker retry limit from 3 to 0.",
+    "failure": "There was 1 execution after a transient error; 4 were expected.",
     "observations": [
-      "APIはジョブを受け付けて202を返した。",
-      "ワーカーは最初の実行を開始した。"
+      "The API accepted the job and returned 202.",
+      "The worker started the first execution."
     ]
   },
   "questions": {
     "retry_limit": {
       "type": "noul",
-      "instructions": "`change` によって再試行上限が0になったことが `failure` の原因である可能性を、`observations` を含む現在の証拠だけで評価してください。"
+      "instructions": "Using only the current evidence, including `observations`, assess whether the retry limit becoming 0 because of `change` could have caused `failure`."
     },
     "api_registration": {
       "type": "noul",
-      "instructions": "APIがジョブを正しく登録しなかったことが `failure` の原因である可能性を、`observations` を含む現在の証拠だけで評価してください。"
+      "instructions": "Using only the current evidence, including `observations`, assess whether the API failing to register the job correctly could have caused `failure`."
     },
     "worker_crash": {
       "type": "noul",
-      "instructions": "ワーカーが最初の実行後に異常終了したことが `failure` の原因である可能性を、`observations` を含む現在の証拠だけで評価してください。"
+      "instructions": "Using only the current evidence, including `observations`, assess whether the worker crashing after the first execution could have caused `failure`."
     }
   }
 }
 ```
 
-たとえば `retry_limit` が上位でも、再試行上限を元に戻す診断や、再試行判定の単体テストで因果を確認する。ほかの仮説が低いことだけを、原因確定の証拠にしない。
+Even if `retry_limit` ranks first, verify causality by restoring the previous limit or running a focused retry-branch test. Low scores for other hypotheses do not prove the leading one.
