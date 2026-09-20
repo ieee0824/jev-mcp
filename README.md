@@ -88,6 +88,18 @@ tool_timeout_sec = 70
 
 ## ツールの使い方
 
+### Codex スキルから使う
+
+[jev-decisions スキル](skills/jev-decisions/SKILL.md) を同梱しています。Jev に渡す判断の選び方、バッチ化、回答の解釈、追加調査へのつなげ方を Codex に伝えます。
+
+`skills/jev-decisions` フォルダーを個人用のスキルディレクトリ（通常は `~/.codex/skills/`）に配置すると、次のように呼び出せます。`CODEX_HOME` を設定している場合は、その配下の `skills/` を使います。
+
+```text
+$jev-decisions このテスト失敗と差分の関連性を評価して、次に調べる箇所を絞って。
+```
+
+スキルと MCP サーバーは別です。事前に上記の MCP 接続と API キーの設定を済ませてください。
+
 ### 共通仕様
 
 - `state`：評価する情報。文字列、オブジェクト、配列を指定できます。

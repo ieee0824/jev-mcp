@@ -1,0 +1,9 @@
+interface:
+  display_name: "Jev による判断支援"
+  short_description: "Jev MCP を使い、テスト失敗の分類や関連性・優先順位の判断を支援する"
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "jev"
+      description: "設定済みの Jev stdio MCP サーバー"
