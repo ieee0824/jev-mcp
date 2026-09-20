@@ -280,6 +280,14 @@ confidence < 0.60
 cargo run --locked -- eval validate tests/fixtures/eval-valid.jsonl
 ```
 
+検証済みのケースを実際の TypeSafe API に対して逐次実行するには、API キーを設定して `run` を使います。このコマンドは**有料の API 呼び出しを発生させる場合があります**。
+
+```sh
+TYPESAFE_API_KEY="your_typesafe_api_key" cargo run --locked -- eval run tests/fixtures/eval-valid.jsonl > eval-results.jsonl
+```
+
+stdout にはケースごとの JSON と、最後に `type: "summary"` の集計を出力します。ケース結果には ID、`pass` / `fail` / `error`、実測値、解決されたモデル、所要時間、トークン使用量が含まれます。期待値の不一致は `fail`、通信やAPIの失敗は `error` として区別され、途中のエラー後も残りのケースを実行します。API キーと送信した `state` は出力しません。
+
 ## 通信とエラー処理
 
 すべてのツールは、渡された情報と質問を次のエンドポイントへ送信します。
