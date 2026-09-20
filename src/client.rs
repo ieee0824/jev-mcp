@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use reqwest::{Client, header, redirect::Policy};
 use serde_json::{Value, json};
@@ -19,6 +22,15 @@ pub struct TypeSafeClient {
     default_model: String,
     timeout: Duration,
     retry_delay: Duration,
+}
+
+pub struct EvaluationReport {
+    pub result: Result<Value, ToolError>,
+    pub attempts: usize,
+    pub requested_model: String,
+    pub resolved_model: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
 }
 
 impl TypeSafeClient {
@@ -71,30 +83,63 @@ impl TypeSafeClient {
         })
     }
 
+    #[cfg(test)]
     pub async fn evaluate(&self, input: BatchInput) -> Result<Value, ToolError> {
-        input.validate().map_err(ToolError::validation)?;
-        let key = self.authorization.as_ref().ok_or_else(|| {
-            ToolError::authentication(
+        self.evaluate_detailed(input).await.result
+    }
+
+    pub async fn evaluate_detailed(&self, input: BatchInput) -> EvaluationReport {
+        let requested_model = input
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model.clone());
+        let attempts = AtomicUsize::new(0);
+        let result = if let Err(error) = input.validate() {
+            Err(ToolError::validation(error))
+        } else if let Some(key) = self.authorization.as_ref() {
+            match tokio::time::timeout(self.timeout, self.request(&input, key, &attempts)).await {
+                Ok(result) => result,
+                Err(_) => Err(ToolError::timeout(
+                    "TypeSafe request exceeded the total timeout",
+                )),
+            }
+        } else {
+            Err(ToolError::authentication(
                 "TYPESAFE_API_KEY is not set. Set it in the server environment and restart the server.",
                 None,
-            )
-        })?;
-        tokio::time::timeout(self.timeout, self.request(&input, key))
-            .await
-            .map_err(|_| ToolError::timeout("TypeSafe request exceeded the total timeout"))?
+            ))
+        };
+        let (resolved_model, input_tokens, output_tokens) = match &result {
+            Ok((_, evaluation)) => (
+                Some(evaluation.model.clone()),
+                Some(evaluation.usage.input_tokens),
+                Some(evaluation.usage.output_tokens),
+            ),
+            Err(_) => (None, None, None),
+        };
+        EvaluationReport {
+            result: result.map(|(value, _)| value),
+            attempts: attempts.load(Ordering::Relaxed),
+            requested_model,
+            resolved_model,
+            input_tokens,
+            output_tokens,
+        }
     }
 
     async fn request(
         &self,
         input: &BatchInput,
         key: &header::HeaderValue,
-    ) -> Result<Value, ToolError> {
+        attempts: &AtomicUsize,
+    ) -> Result<(Value, Evaluation), ToolError> {
         let body = json!({
             "state": input.state,
             "model": input.model.as_ref().unwrap_or(&self.default_model),
             "questions": input.questions,
         });
         for attempt in 0..3 {
+            attempts.store(attempt + 1, Ordering::Relaxed);
             let mut response = self
                 .http
                 .post(&self.endpoint)
@@ -175,7 +220,7 @@ impl TypeSafeClient {
                     status,
                 ));
             }
-            return Ok(value);
+            return Ok((value, parsed));
         }
         unreachable!("the final attempt always returns")
     }

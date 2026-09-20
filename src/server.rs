@@ -2,16 +2,28 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, model::*, service::RequestConte
 use schemars::{JsonSchema, schema_for};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::time::Instant;
 
-use crate::{client::TypeSafeClient, error::ToolError, types::*};
+use crate::{
+    client::TypeSafeClient,
+    error::ToolError,
+    telemetry::{CallStatus, CallTelemetry, Telemetry, TelemetryError},
+    types::*,
+};
 
 pub struct JevServer {
     client: TypeSafeClient,
+    telemetry: Telemetry,
 }
 
 impl JevServer {
+    #[cfg(test)]
     pub fn new(client: TypeSafeClient) -> Self {
-        Self { client }
+        Self::with_telemetry(client, Telemetry::disabled())
+    }
+
+    pub fn with_telemetry(client: TypeSafeClient, telemetry: Telemetry) -> Self {
+        Self { client, telemetry }
     }
 
     pub async fn dispatch(
@@ -22,14 +34,74 @@ impl JevServer {
         if !matches!(name, "jev.noul" | "jev.choice" | "jev.score" | "jev.batch") {
             return Err(ErrorData::invalid_params("Unknown tool", None));
         }
+        let started = Instant::now();
+        let question_count = question_count(name, &arguments);
         let input = match decode(name, arguments) {
             Ok(input) => input,
-            Err(error) => return Ok(error_result(error)),
+            Err(error) => {
+                self.record_error(name, question_count, started, 0, &error);
+                return Ok(error_result(error));
+            }
         };
-        Ok(match self.client.evaluate(input).await {
-            Ok(value) => CallToolResult::structured(value),
-            Err(error) => error_result(error),
-        })
+        let report = self.client.evaluate_detailed(input).await;
+        match report.result {
+            Ok(value) => {
+                self.telemetry.record(&CallTelemetry {
+                    tool: name,
+                    question_count,
+                    elapsed_ms: elapsed_ms(started),
+                    attempts: report.attempts,
+                    status: CallStatus::Success,
+                    requested_model: Some(&report.requested_model),
+                    resolved_model: report.resolved_model.as_deref(),
+                    input_tokens: report.input_tokens,
+                    output_tokens: report.output_tokens,
+                    error: None,
+                });
+                Ok(CallToolResult::structured(value))
+            }
+            Err(error) => {
+                self.record_error(name, question_count, started, report.attempts, &error);
+                Ok(error_result(error))
+            }
+        }
+    }
+
+    fn record_error(
+        &self,
+        tool: &str,
+        question_count: usize,
+        started: Instant,
+        attempts: usize,
+        error: &ToolError,
+    ) {
+        self.telemetry.record(&CallTelemetry {
+            tool,
+            question_count,
+            elapsed_ms: elapsed_ms(started),
+            attempts,
+            status: CallStatus::Error,
+            requested_model: None,
+            resolved_model: None,
+            input_tokens: None,
+            output_tokens: None,
+            error: Some(TelemetryError { kind: error.kind }),
+        });
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn question_count(name: &str, arguments: &Value) -> usize {
+    if name == "jev.batch" {
+        arguments
+            .get("questions")
+            .and_then(Value::as_object)
+            .map_or(0, serde_json::Map::len)
+    } else {
+        1
     }
 }
 
