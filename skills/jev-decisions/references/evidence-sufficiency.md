@@ -1,67 +1,67 @@
-# 提出前の証拠充足チェック
+# Checking Evidence Sufficiency Before Submission
 
-修正後に1回成功した事実だけで完了とせず、提出判断に必要な証拠の不足を見つけるときに使う。これはレビューの準備を助ける評価であり、テスト成功、コードレビュー、ユーザーの承認を置き換えない。
+Use this recipe to find missing evidence before declaring a fix ready for submission. One successful run after a change is not sufficient on its own. This assessment helps prepare for review; it does not replace passing tests, code review, or user authorization.
 
-## 評価する観点
+## Dimensions to assess
 
-同じ証拠に対して、少なくとも次の観点を独立した質問にする。
+Ask independent questions about at least these dimensions when they apply:
 
-- **再現**: 修正前の失敗を再現し、対象の症状を確認したか。
-- **原因との因果**: 観測と診断が、修正箇所と失敗の因果を支持しているか。
-- **修正後の確認**: 同じ再現条件で修正後に成功したか。
-- **回帰テスト**: 修正を戻すと失敗し、修正を適用すると成功するなど、将来の再発を検出できるテストがあるか。
-- **影響範囲**: 変更が触れる経路や境界条件に応じた確認が済んでいるか。
+- **Reproduction:** Was the original failure reproduced before the fix, confirming the reported symptom?
+- **Causality:** Do observations and diagnostics support a causal link between the failure and the changed area?
+- **Post-fix verification:** Does the original reproduction succeed after the fix?
+- **Regression test:** Can the test detect recurrence, such as failing when the fix is removed and passing when restored?
+- **Impact coverage:** Were the affected paths and boundary conditions checked?
 
-質問IDは回答を対応付けるラベルにすぎない。各 `instructions` に対象、必要な証拠、Yesとみなす条件を完全に書く。
+Question IDs only map answers. Each `instructions` field must state the target, required evidence, and condition for Yes in full.
 
-## 手順
+## Procedure
 
-1. 実行コマンド、終了状態、重要な観測、変更との対応を `state` に短くまとめる。未実施の確認は未実施と明記し、推測で埋めない。
-2. 上の観点を Noul として1回の Batchで評価する。Scoreを使う場合も、各観点を混ぜず同じ段階定義で個別に問う。
-3. Noが強い観点、Noulが0.5付近で不確かな観点、または根拠を対応付けられない観点があれば、完了扱いにしない。不足するログ、テスト、比較条件、影響経路をCodexが収集する。
-4. 証拠を追加したら必要な観点だけ再評価し、最後は実際のテスト結果と差分をCodexが確認する。
+1. Summarize commands, exit states, material observations, and their relationship to the change in `state`. Mark unperformed checks as unperformed instead of filling gaps with assumptions.
+2. Ask one Noul question per dimension in a single Batch. If using Score, keep dimensions separate and use identical levels.
+3. Do not mark the work complete when a dimension is strongly No, when a Noul value near 0.5 shows uncertainty, or when evidence cannot be tied to the dimension. Have Codex gather the missing logs, tests, comparisons, or impact-path evidence.
+4. After adding evidence, reevaluate only the dimensions that changed. Codex must still inspect the final diff and actual test results.
 
-Jevがすべてを高く評価しても、自動で提出、承認、マージを行わない。必要な承認やリポジトリの手順は別に満たす。
+Even if Jev rates every dimension highly, do not automatically submit, approve, or merge. Complete the repository's review and authorization requirements separately.
 
-## Batch の例
+## Batch example
 
 ```json
 {
   "state": {
-    "reported_failure": "一時エラー後にジョブが再試行されない。",
+    "reported_failure": "The job is not retried after a transient error.",
     "before_fix": {
       "command": "cargo test worker_retries_transient_failure",
-      "result": "失敗: expected 4 attempts, got 1"
+      "result": "failed: expected 4 attempts, got 1"
     },
-    "diagnosis": "再試行上限が0に設定され、失敗後の分岐が終了していた。",
-    "change": "再試行上限を3に戻し、設定値0の境界テストを追加した。",
+    "diagnosis": "The retry limit was 0, so the branch terminated after failure.",
+    "change": "Restored the retry limit to 3 and added a boundary test for a configured value of 0.",
     "after_fix": {
-      "focused_test": "成功",
-      "full_suite": "成功"
+      "focused_test": "passed",
+      "full_suite": "passed"
     },
-    "regression_check": "修正を一時的に戻すと追加テストが失敗し、再適用すると成功した。",
-    "reviewed_paths": ["通常成功", "一時エラー", "恒久エラー", "上限0"]
+    "regression_check": "The added test failed when the fix was temporarily reverted and passed when it was reapplied.",
+    "reviewed_paths": ["normal success", "transient error", "permanent error", "zero limit"]
   },
   "questions": {
     "reproduced": {
       "type": "noul",
-      "instructions": "`before_fix` は `reported_failure` と同じ症状を修正前に再現した証拠として十分ですか？"
+      "instructions": "Is `before_fix` sufficient evidence that the same symptom as `reported_failure` was reproduced before the fix?"
     },
     "causal": {
       "type": "noul",
-      "instructions": "`before_fix` と `diagnosis` は、`change` の対象が `reported_failure` の原因だったという因果を支持していますか？"
+      "instructions": "Do `before_fix` and `diagnosis` support a causal link between the target of `change` and `reported_failure`?"
     },
     "fixed": {
       "type": "noul",
-      "instructions": "`after_fix` は、修正後に同じ失敗が解消し、関連テストが成功したことを示していますか？"
+      "instructions": "Does `after_fix` show that the same failure was resolved after the fix and that the related tests passed?"
     },
     "regression": {
       "type": "noul",
-      "instructions": "`regression_check` は、追加テストがこの不具合の再発を検出できることを示していますか？"
+      "instructions": "Does `regression_check` show that the added test can detect recurrence of this defect?"
     },
     "scope": {
       "type": "noul",
-      "instructions": "`reviewed_paths` と `after_fix` は、`change` が影響する主要経路と境界条件を確認した証拠として十分ですか？"
+      "instructions": "Are `reviewed_paths` and `after_fix` sufficient evidence that the main paths and boundary conditions affected by `change` were checked?"
     }
   }
 }

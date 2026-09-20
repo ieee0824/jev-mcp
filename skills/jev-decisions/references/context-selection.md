@@ -1,69 +1,69 @@
-# コンテキスト保持候補の選別
+# Selecting Context to Retain
 
-長い作業履歴から、次の判断に必要なツール結果や観測を残す・短くする・作業コンテキストから外す候補を選ぶときに使う。このレシピは元の会話、ログ、ファイルを削除しない。
+Use this recipe to decide which tool results and observations from a long work history should remain, be shortened, or leave the active working context. This recipe never deletes the original conversation, logs, or files.
 
-## 先に固定する情報
+## Pin required information first
 
-呼び出し側は、次の情報をJevの選別対象にせず必ず保持する。
+The caller must retain these items without asking Jev to select them:
 
-- ユーザーが示した目的、制約、許可、未回答の要求。
-- 採用した設計と、その理由や重要なトレードオフ。
-- 不具合の再現手順と、結果を比較する条件。
-- 現在の未解決事項、既知のリスク、残っている検証。
+- The user's objective, constraints, permissions, and outstanding requests.
+- The selected design and its rationale or material tradeoffs.
+- Reproduction steps and the conditions used to compare results.
+- Current unresolved items, known risks, and remaining verification.
 
-これらは `pinned_context` として短く整理できるが、保持するかどうかをJevに決めさせない。
+The caller may summarize them as `pinned_context`, but Jev does not decide whether they remain.
 
-## 候補の作り方
+## Forming candidates
 
-残りの履歴を、出所と意味が分かる小さな候補へ分ける。現在成功している結果だけでなく、再発条件、棄却した仮説、以前の失敗を示す観測も候補に含める。現在の成功と矛盾する過去の失敗は、環境差や不安定性を示す可能性がある。
+Split the rest of the history into small candidates whose source and meaning remain clear. Include current successes and also observations that show recurrence conditions, rejected hypotheses, or earlier failures. A past failure that conflicts with a current success may reveal an environment difference or instability.
 
-各候補について、次の行動または未解決の判断に必要かを Noul で尋ね、1回の Batchにまとめる。候補の重要度を段階で比較したい場合は、同じ基準を持つ Score を候補ごとに使える。複数候補が同時に必要になり得るため、通常はChoiceを使わない。
+Ask one Noul question per candidate about whether it is needed for the next action or unresolved decision, and put the questions in one Batch. To compare candidate importance on ordered levels, use one Score per candidate with identical criteria. Because several candidates may all be needed, Choice is usually inappropriate.
 
-## Batch の例
+## Batch example
 
 ```json
 {
   "state": {
-    "next_decision": "再試行修正を提出できるか判断する。",
+    "next_decision": "Decide whether the retry fix is ready for submission.",
     "pinned_context": {
-      "user_constraint": "公開APIの形式を変えない。",
-      "design_reason": "再試行上限の既定値を保ち、明示設定だけを尊重する。",
-      "reproduction": "一時エラー時に期待4回、実測1回だった。",
-      "unresolved": "全テストと静的検査が未実施。"
+      "user_constraint": "Do not change the public API format.",
+      "design_reason": "Preserve the default retry limit and honor only explicit configuration.",
+      "reproduction": "After a transient error, 4 executions were expected and 1 was observed.",
+      "unresolved": "The full test suite and static analysis have not run."
     },
     "candidates": {
-      "focused_success": "修正後、対象の再試行テストは成功した。",
-      "past_failure": "修正前は同じテストが期待4回、実測1回で失敗した。",
-      "unrelated_format": "ドキュメント整形テストが改行差分で失敗したが、再実行では成功した。",
-      "discarded_api_hypothesis": "APIは202を返し、ジョブ登録要求を受け付けていたため、API原因説を棄却した。"
+      "focused_success": "After the fix, the focused retry test passed.",
+      "past_failure": "Before the fix, the same test failed with 1 execution when 4 were expected.",
+      "unrelated_format": "A documentation formatting test failed because of a newline difference but passed on rerun.",
+      "discarded_api_hypothesis": "The API returned 202 and accepted the job registration request, so the API hypothesis was rejected."
     }
   },
   "questions": {
     "keep_focused_success": {
       "type": "noul",
-      "instructions": "`candidates.focused_success` は、`next_decision` で修正後の対象動作を確認するために保持すべき証拠ですか？"
+      "instructions": "Should `candidates.focused_success` be retained as evidence of the target behavior after the fix for `next_decision`?"
     },
     "keep_past_failure": {
       "type": "noul",
-      "instructions": "`candidates.past_failure` は、再現条件と修正前後の差を保つために `next_decision` の作業コンテキストへ保持すべき証拠ですか？"
+      "instructions": "Should `candidates.past_failure` remain in the working context for `next_decision` to preserve the reproduction condition and before-and-after difference?"
     },
     "keep_unrelated_format": {
       "type": "noul",
-      "instructions": "`candidates.unrelated_format` は、再試行修正の提出可否という `next_decision` に必要なため作業コンテキストへ保持すべき証拠ですか？"
+      "instructions": "Should `candidates.unrelated_format` remain in the working context because it is needed for `next_decision` about submitting the retry fix?"
     },
     "keep_discarded_api_hypothesis": {
       "type": "noul",
-      "instructions": "`candidates.discarded_api_hypothesis` は、同じ誤った調査を繰り返さず原因説明を保つために `next_decision` の作業コンテキストへ保持すべき証拠ですか？"
+      "instructions": "Should `candidates.discarded_api_hypothesis` remain in the working context for `next_decision` to preserve the causal explanation and avoid repeating the same rejected investigation?"
     }
   }
 }
 ```
 
-## 結果の反映
+## Applying the result
 
-- 強く必要と評価された候補は、出所と観測を保って残す。
-- 不確かな候補は、意味を失わない短い要約にできるか呼び出し側が判断する。
-- 必要性が低い候補は、現在の作業コンテキストから外せる。ただし元の会話、ログ、ファイルを削除する許可にはならない。
-- `pinned_context` は結果にかかわらず保持する。
+- Retain strongly relevant candidates with their source and observation intact.
+- For uncertain candidates, have the caller decide whether a shorter summary can preserve their meaning.
+- Remove low-relevance candidates only from the active working context. This does not authorize deleting the original conversation, logs, or files.
+- Retain `pinned_context` regardless of the evaluation.
 
-選別後も、次の判断に必要な反証や過去の失敗が残っているかをCodexが確認する。Jevの評価だけを理由に、監査記録やユーザーデータの保存方針を変えない。
+After selection, Codex must confirm that evidence needed to refute the current explanation and relevant past failures are still available. Never change audit-record or user-data retention based only on Jev's assessment.
