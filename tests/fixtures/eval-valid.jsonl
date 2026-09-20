@@ -1,0 +1,3 @@
+{"id":"relevance","state":"The changed function appears in the failing stack trace.","question":{"type":"noul","instructions":"Is the failure likely related to the change?"},"expected":{"type":"noul","min":0.7,"max":1.0}}
+{"id":"owner","state":{"changed":"retry worker","failure":"retry test"},"question":{"type":"choice","instructions":"Which subsystem should be investigated first?","criteria":{"worker":"Background jobs and retries","api":"HTTP handling","unknown":"Insufficient evidence"}},"expected":{"type":"choice","allowed":["worker"]}}
+{"id":"risk","state":["Retry limit changed from 3 to 0"],"question":{"type":"score","instructions":"Rate the behavior-change risk.","criteria":["low","medium","high"]},"expected":{"type":"score","min":1.5,"max":2.0}}
