@@ -13,7 +13,7 @@ use wiremock::{
     matchers::{body_json, header, method, path},
 };
 
-use crate::{client::TypeSafeClient, server::JevServer};
+use crate::{client::TypeSafeClient, error::ErrorKind, server::JevServer};
 
 fn client(mock: &MockServer, key: Option<&str>) -> TypeSafeClient {
     TypeSafeClient::new(
@@ -30,6 +30,24 @@ fn response(answers: Value) -> Value {
 
 fn noul_args() -> Value {
     json!({"state": "test evidence", "instructions": "Is this relevant?"})
+}
+
+fn assert_tool_error(
+    result: &rmcp::model::CallToolResult,
+    kind: ErrorKind,
+    retryable: bool,
+    status: Option<u16>,
+) {
+    assert_eq!(result.is_error, Some(true));
+    let error = &result.structured_content.as_ref().unwrap()["error"];
+    assert_eq!(error["kind"], serde_json::to_value(kind).unwrap());
+    assert_eq!(error["retryable"], retryable);
+    match status {
+        Some(status) => assert_eq!(error["status"], status),
+        None => assert!(error.get("status").is_none()),
+    }
+    let content = serde_json::to_value(&result.content).unwrap();
+    assert_eq!(content[0]["text"], error["message"]);
 }
 
 #[tokio::test]
@@ -164,24 +182,19 @@ async fn invalid_input_never_reaches_api() {
         ),
     ];
     for (name, args) in cases {
-        assert_eq!(
-            server.dispatch(name, args).await.unwrap().is_error,
-            Some(true)
-        );
+        let result = server.dispatch(name, args).await.unwrap();
+        assert_tool_error(&result, ErrorKind::Validation, false, None);
     }
     let too_many: serde_json::Map<String, Value> =
         (0..256).map(|i| (i.to_string(), Value::Null)).collect();
-    assert_eq!(
-        server
-            .dispatch(
-                "jev.choice",
-                json!({"state":"s","instructions":"q","criteria":too_many})
-            )
-            .await
-            .unwrap()
-            .is_error,
-        Some(true)
-    );
+    let result = server
+        .dispatch(
+            "jev.choice",
+            json!({"state":"s","instructions":"q","criteria":too_many}),
+        )
+        .await
+        .unwrap();
+    assert_tool_error(&result, ErrorKind::Validation, false, None);
     assert!(server.dispatch("unknown", json!({})).await.is_err());
     assert!(mock.received_requests().await.unwrap().is_empty());
 }
@@ -193,13 +206,59 @@ async fn missing_key_is_tool_error_without_http() {
         .dispatch("jev.noul", noul_args())
         .await
         .unwrap();
-    assert_eq!(result.is_error, Some(true));
+    assert_tool_error(&result, ErrorKind::Authentication, false, None);
     assert!(
         serde_json::to_string(&result)
             .unwrap()
             .contains("TYPESAFE_API_KEY")
     );
     assert!(mock.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn network_and_timeout_failures_are_structured_tool_errors() {
+    let network_client = TypeSafeClient::new(
+        "not a URL".into(),
+        Some("test-secret".into()),
+        "jev-latest".into(),
+    )
+    .unwrap();
+    let network = JevServer::new(network_client)
+        .dispatch("jev.noul", noul_args())
+        .await
+        .unwrap();
+    assert_tool_error(&network, ErrorKind::Network, true, None);
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let mut timeout_client = client(&mock, Some("test-secret"));
+    timeout_client.set_total_timeout(Duration::from_millis(50));
+    let timeout = JevServer::new(timeout_client)
+        .dispatch("jev.noul", noul_args())
+        .await
+        .unwrap();
+    assert_tool_error(&timeout, ErrorKind::Timeout, true, None);
+}
+
+#[tokio::test]
+async fn validation_errors_do_not_echo_arguments() {
+    let mock = MockServer::start().await;
+    let result = JevServer::new(client(&mock, Some("test-secret")))
+        .dispatch(
+            "jev.noul",
+            json!({"state":"private-state","instructions":"private-question","unexpected":"private-value"}),
+        )
+        .await
+        .unwrap();
+    assert_tool_error(&result, ErrorKind::Validation, false, None);
+    let serialized = serde_json::to_string(&result).unwrap();
+    assert!(!serialized.contains("private-state"));
+    assert!(!serialized.contains("private-question"));
+    assert!(!serialized.contains("private-value"));
 }
 
 #[tokio::test]
@@ -245,7 +304,14 @@ async fn http_errors_are_bounded_and_do_not_echo_response_bodies() {
             .dispatch("jev.noul", noul_args())
             .await
             .unwrap();
-        assert_eq!(result.is_error, Some(true));
+        let (kind, retryable) = match status {
+            401 => (ErrorKind::Authentication, false),
+            422 => (ErrorKind::Validation, false),
+            429 => (ErrorKind::RateLimit, true),
+            529 | 500 => (ErrorKind::Http, true),
+            _ => (ErrorKind::Http, false),
+        };
+        assert_tool_error(&result, kind, retryable, Some(status));
         let serialized = serde_json::to_string(&result).unwrap();
         assert!(serialized.contains(&status.to_string()));
         assert!(!serialized.contains("secret-and-private-state"));
@@ -270,13 +336,10 @@ async fn rejects_malformed_or_mismatched_upstream_answers() {
             .expect(1)
             .mount(&mock)
             .await;
-        assert_eq!(
-            JevServer::new(client(&mock, Some("test-secret")))
-                .dispatch("jev.noul", noul_args())
-                .await
-                .unwrap()
-                .is_error,
-            Some(true)
-        );
+        let result = JevServer::new(client(&mock, Some("test-secret")))
+            .dispatch("jev.noul", noul_args())
+            .await
+            .unwrap();
+        assert_tool_error(&result, ErrorKind::InvalidResponse, false, Some(200));
     }
 }

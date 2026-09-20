@@ -3,7 +3,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{client::TypeSafeClient, types::*};
+use crate::{client::TypeSafeClient, error::ToolError, types::*};
 
 pub struct JevServer {
     client: TypeSafeClient,
@@ -24,18 +24,25 @@ impl JevServer {
         }
         let input = match decode(name, arguments) {
             Ok(input) => input,
-            Err(error) => return Ok(CallToolResult::error(vec![ContentBlock::text(error)])),
+            Err(error) => return Ok(error_result(error)),
         };
         Ok(match self.client.evaluate(input).await {
             Ok(value) => CallToolResult::structured(value),
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
+            Err(error) => error_result(error),
         })
     }
 }
 
-fn decode(name: &str, args: Value) -> Result<BatchInput, String> {
-    fn parse<T: DeserializeOwned>(args: Value) -> Result<T, String> {
-        serde_json::from_value(args).map_err(|e| format!("Invalid tool arguments: {e}"))
+fn error_result(error: ToolError) -> CallToolResult {
+    let message = error.message.clone();
+    let mut result = CallToolResult::structured_error(serde_json::json!({ "error": error }));
+    result.content = vec![ContentBlock::text(message)];
+    result
+}
+
+fn decode(name: &str, args: Value) -> Result<BatchInput, ToolError> {
+    fn parse<T: DeserializeOwned>(args: Value) -> Result<T, ToolError> {
+        serde_json::from_value(args).map_err(|_| ToolError::validation("Invalid tool arguments"))
     }
     Ok(match name {
         "jev.noul" => {

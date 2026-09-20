@@ -3,7 +3,10 @@ use std::time::Duration;
 use reqwest::{Client, header, redirect::Policy};
 use serde_json::{Value, json};
 
-use crate::types::{BatchInput, Evaluation};
+use crate::{
+    error::ToolError,
+    types::{BatchInput, Evaluation},
+};
 
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -68,21 +71,24 @@ impl TypeSafeClient {
         })
     }
 
-    pub async fn evaluate(&self, input: BatchInput) -> Result<Value, String> {
-        input.validate()?;
-        let key = self.authorization.as_ref().ok_or(
-            "TYPESAFE_API_KEY is not set. Set it in the server environment and restart the server.",
-        )?;
+    pub async fn evaluate(&self, input: BatchInput) -> Result<Value, ToolError> {
+        input.validate().map_err(ToolError::validation)?;
+        let key = self.authorization.as_ref().ok_or_else(|| {
+            ToolError::authentication(
+                "TYPESAFE_API_KEY is not set. Set it in the server environment and restart the server.",
+                None,
+            )
+        })?;
         tokio::time::timeout(self.timeout, self.request(&input, key))
             .await
-            .map_err(|_| "TypeSafe request exceeded the total timeout".to_string())?
+            .map_err(|_| ToolError::timeout("TypeSafe request exceeded the total timeout"))?
     }
 
     async fn request(
         &self,
         input: &BatchInput,
         key: &header::HeaderValue,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ToolError> {
         let body = json!({
             "state": input.state,
             "model": input.model.as_ref().unwrap_or(&self.default_model),
@@ -96,11 +102,11 @@ impl TypeSafeClient {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        "TypeSafe request timed out".to_string()
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        ToolError::timeout("TypeSafe request timed out")
                     } else {
-                        "Could not connect to TypeSafe API".to_string()
+                        ToolError::network("Could not connect to TypeSafe API", None)
                     }
                 })?;
             let status = response.status().as_u16();
@@ -120,46 +126,70 @@ impl TypeSafeClient {
             }
             if !response.status().is_success() {
                 // Do not echo remote bodies: they can contain credentials or submitted state.
-                let reason = match status {
-                    401 => "authentication failed; check TYPESAFE_API_KEY",
-                    422 => {
-                        "request rejected by API validation; check model and question definitions"
+                return Err(match status {
+                    401 => ToolError::authentication(
+                        "TypeSafe authentication failed; check TYPESAFE_API_KEY",
+                        Some(status),
+                    ),
+                    422 => ToolError::validation_response(
+                        "TypeSafe rejected the request; check model and question definitions",
+                        status,
+                    ),
+                    429 => ToolError::rate_limit(
+                        "TypeSafe rate limit was exceeded after retries",
+                        status,
+                    ),
+                    529 => {
+                        ToolError::http("TypeSafe remained overloaded after retries", status, true)
                     }
-                    429 => "rate limit exceeded after retries",
-                    529 => "service overloaded after retries",
-                    _ => "unexpected API response",
-                };
-                return Err(format!("TypeSafe HTTP {status}: {reason}"));
+                    _ => ToolError::http(
+                        "TypeSafe returned an unexpected HTTP response",
+                        status,
+                        status >= 500,
+                    ),
+                });
             }
             let mut bytes = Vec::new();
             while let Some(chunk) = response
                 .chunk()
                 .await
-                .map_err(|_| "Could not read TypeSafe response".to_string())?
+                .map_err(|_| ToolError::network("Could not read TypeSafe response", Some(status)))?
             {
                 if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                    return Err("TypeSafe response exceeds 8 MiB".into());
+                    return Err(ToolError::invalid_response(
+                        "TypeSafe response exceeds 8 MiB",
+                        status,
+                    ));
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            let value: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| "TypeSafe returned invalid JSON".to_string())?;
-            let parsed: Evaluation = serde_json::from_value(value.clone())
-                .map_err(|_| "TypeSafe returned an invalid answer structure".to_string())?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                ToolError::invalid_response("TypeSafe returned invalid JSON", status)
+            })?;
+            let parsed: Evaluation = serde_json::from_value(value.clone()).map_err(|_| {
+                ToolError::invalid_response("TypeSafe returned an invalid answer structure", status)
+            })?;
             if !parsed.matches(&input.questions) {
-                return Err(
-                    "TypeSafe answers do not match the requested questions or value ranges".into(),
-                );
+                return Err(ToolError::invalid_response(
+                    "TypeSafe answers do not match the requested questions or value ranges",
+                    status,
+                ));
             }
             return Ok(value);
         }
         unreachable!("the final attempt always returns")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_total_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorKind;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     fn input() -> BatchInput {
@@ -187,7 +217,10 @@ mod tests {
                     .unwrap();
             client.timeout = Duration::from_millis(100);
             let error = client.evaluate(input()).await.unwrap_err();
-            assert!(error.contains("total timeout"), "{error}");
+            assert_eq!(error.kind, ErrorKind::Timeout);
+            assert!(error.retryable);
+            assert!(error.message.contains("total timeout"));
+            assert_eq!(error.status, None);
         }
     }
 
@@ -204,10 +237,25 @@ mod tests {
         let client =
             TypeSafeClient::new(mock.uri(), Some("test-secret".into()), "jev-latest".into())
                 .unwrap();
-        assert_eq!(
-            client.evaluate(input()).await.unwrap_err(),
-            "TypeSafe response exceeds 8 MiB"
-        );
+        let error = client.evaluate(input()).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidResponse);
+        assert_eq!(error.message, "TypeSafe response exceeds 8 MiB");
+        assert_eq!(error.status, Some(200));
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
+    async fn connection_failures_are_retryable_network_errors() {
+        let client = TypeSafeClient::new(
+            "not a URL".into(),
+            Some("test-secret".into()),
+            "jev-latest".into(),
+        )
+        .unwrap();
+        let error = client.evaluate(input()).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Network);
+        assert!(error.retryable);
+        assert_eq!(error.status, None);
     }
 
     #[test]
