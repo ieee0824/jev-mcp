@@ -5,8 +5,10 @@ use serde_json::Value;
 use std::time::Instant;
 
 use crate::{
-    client::TypeSafeClient,
+    client::{EvaluationSuccess, TypeSafeClient},
     error::ToolError,
+    policy::PolicyConfig,
+    profile::ExecutionProfile,
     telemetry::{CallStatus, CallTelemetry, Telemetry, TelemetryError},
     types::*,
 };
@@ -14,16 +16,33 @@ use crate::{
 pub struct JevServer {
     client: TypeSafeClient,
     telemetry: Telemetry,
+    policy: PolicyConfig,
+}
+
+struct ErrorCall<'a> {
+    profile: Option<ExecutionProfile>,
+    attempts: usize,
+    timeout_count: usize,
+    requested_model: Option<&'a str>,
 }
 
 impl JevServer {
     #[cfg(test)]
     pub fn new(client: TypeSafeClient) -> Self {
-        Self::with_telemetry(client, Telemetry::disabled())
+        Self::with_config(client, Telemetry::disabled(), PolicyConfig::default())
     }
 
+    #[cfg(test)]
     pub fn with_telemetry(client: TypeSafeClient, telemetry: Telemetry) -> Self {
-        Self { client, telemetry }
+        Self::with_config(client, telemetry, PolicyConfig::default())
+    }
+
+    pub fn with_config(client: TypeSafeClient, telemetry: Telemetry, policy: PolicyConfig) -> Self {
+        Self {
+            client,
+            telemetry,
+            policy,
+        }
     }
 
     pub async fn dispatch(
@@ -39,18 +58,32 @@ impl JevServer {
         let input = match decode(name, arguments) {
             Ok(input) => input,
             Err(error) => {
-                self.record_error(name, question_count, started, 0, &error);
+                self.record_error(
+                    name,
+                    question_count,
+                    started,
+                    ErrorCall {
+                        profile: None,
+                        attempts: 0,
+                        timeout_count: 0,
+                        requested_model: None,
+                    },
+                    &error,
+                );
                 return Ok(error_result(error));
             }
         };
         let report = self.client.evaluate_detailed(input).await;
         match report.result {
-            Ok(value) => {
+            Ok(success) => {
                 self.telemetry.record(&CallTelemetry {
                     tool: name,
                     question_count,
                     elapsed_ms: elapsed_ms(started),
                     attempts: report.attempts,
+                    retry_count: report.attempts.saturating_sub(1),
+                    timeout_count: report.timeout_count,
+                    profile: Some(report.profile),
                     status: CallStatus::Success,
                     requested_model: Some(&report.requested_model),
                     resolved_model: report.resolved_model.as_deref(),
@@ -58,13 +91,35 @@ impl JevServer {
                     output_tokens: report.output_tokens,
                     error: None,
                 });
-                Ok(CallToolResult::structured(value))
+                Ok(CallToolResult::structured(self.with_policy(success)))
             }
             Err(error) => {
-                self.record_error(name, question_count, started, report.attempts, &error);
+                self.record_error(
+                    name,
+                    question_count,
+                    started,
+                    ErrorCall {
+                        profile: Some(report.profile),
+                        attempts: report.attempts,
+                        timeout_count: report.timeout_count,
+                        requested_model: Some(&report.requested_model),
+                    },
+                    &error,
+                );
                 Ok(error_result(error))
             }
         }
+    }
+
+    fn with_policy(&self, success: EvaluationSuccess) -> Value {
+        let mut value = success.value;
+        let policy = serde_json::to_value(self.policy.assess(&success.evaluation))
+            .expect("policy assessment is serializable");
+        value
+            .as_object_mut()
+            .expect("validated evaluation is a JSON object")
+            .insert("policy".into(), policy);
+        value
     }
 
     fn record_error(
@@ -72,16 +127,19 @@ impl JevServer {
         tool: &str,
         question_count: usize,
         started: Instant,
-        attempts: usize,
+        call: ErrorCall<'_>,
         error: &ToolError,
     ) {
         self.telemetry.record(&CallTelemetry {
             tool,
             question_count,
             elapsed_ms: elapsed_ms(started),
-            attempts,
+            attempts: call.attempts,
+            retry_count: call.attempts.saturating_sub(1),
+            timeout_count: call.timeout_count,
+            profile: call.profile,
             status: CallStatus::Error,
-            requested_model: None,
+            requested_model: call.requested_model,
             resolved_model: None,
             input_tokens: None,
             output_tokens: None,
@@ -107,7 +165,10 @@ fn question_count(name: &str, arguments: &Value) -> usize {
 
 fn error_result(error: ToolError) -> CallToolResult {
     let message = error.message.clone();
-    let mut result = CallToolResult::structured_error(serde_json::json!({ "error": error }));
+    let mut result = CallToolResult::structured_error(serde_json::json!({
+        "error": error,
+        "policy": PolicyConfig::failure(),
+    }));
     result.content = vec![ContentBlock::text(message)];
     result
 }
@@ -126,6 +187,7 @@ fn decode(name: &str, args: Value) -> Result<BatchInput, ToolError> {
                     criteria: a.criteria,
                 },
                 a.model,
+                a.profile,
             )
         }
         "jev.choice" => {
@@ -137,6 +199,7 @@ fn decode(name: &str, args: Value) -> Result<BatchInput, ToolError> {
                     criteria: a.criteria,
                 },
                 a.model,
+                a.profile,
             )
         }
         "jev.score" => {
@@ -148,6 +211,7 @@ fn decode(name: &str, args: Value) -> Result<BatchInput, ToolError> {
                     criteria: a.criteria,
                 },
                 a.model,
+                a.profile,
             )
         }
         "jev.batch" => parse(args)?,
@@ -168,19 +232,19 @@ pub fn tools() -> Vec<Tool> {
     vec![
         tool::<NoulInput>(
             "jev.noul",
-            "Evaluate one yes/no statement with Jev. Returns answers.result.noul: probability of yes (0..1); near 0 is strong no, near 0.5 uncertain. No separate confidence. Sends supplied state to TypeSafe AI. Prefer jev.batch for multiple questions sharing state.",
+            "Evaluate one yes/no statement with Jev. Returns the raw Yes probability plus deterministic policy guidance. Near 0.5 is uncertain. Optional profile overrides reliable/interactive latency behavior. Sends supplied state to TypeSafe AI.",
         ),
         tool::<ChoiceInput>(
             "jev.choice",
-            "Choose among named criteria with Jev. Returns answers.result with choice, probabilities and confidence. Include an unknown/other option when appropriate. Sends supplied state to TypeSafe AI. Prefer jev.batch for multiple questions sharing state.",
+            "Choose one host-defined option with Jev. Returns choice, the complete probability distribution, confidence, and deterministic policy guidance. Include unknown/other when appropriate. Jev does not execute the choice.",
         ),
         tool::<ScoreInput>(
             "jev.score",
-            "Score one dimension using 2..10 ordered descriptive levels. Returns answers.result with score (0..levels-1), legend, probabilities and confidence. Score is a weighted level index, not a probability. Sends supplied state to TypeSafe AI. Prefer jev.batch for multiple questions sharing state.",
+            "Score one dimension using 2..10 ordered descriptive levels. Returns the raw score, legend, probability distribution, confidence, and deterministic policy guidance. Score is a weighted level index, not a probability.",
         ),
         tool::<BatchInput>(
             "jev.batch",
-            "Preferred for multiple independent decisions sharing state: mix noul, choice and score questions in one TypeSafe API request. Answers use your question IDs. Each question sees only the supplied state, not other answers. Ask one focused judgment per question. Returns model, answers and usage. Sends supplied state to TypeSafe AI.",
+            "Evaluate multiple independent closed decisions against shared state in one TypeSafe API request. Questions cannot depend on other answers. Returns raw answers and per-answer deterministic policy guidance. Optional profile overrides reliable/interactive latency behavior.",
         ),
     ]
 }
@@ -189,7 +253,7 @@ impl ServerHandler for JevServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("jev-mcp", env!("CARGO_PKG_VERSION")))
-            .with_instructions("Use Jev for focused decisions grounded in supplied evidence. Prefer jev.batch for independent questions sharing state. Results are judgments, not guarantees. Choice/Score confidence describes the probability distribution; Noul has no separate confidence. All results include model, answers and token usage; single-tool answers are under result.")
+            .with_instructions("Use Jev for focused, closed decisions grounded in supplied evidence. The host investigates and executes actions; Jev only returns typed judgments. Prefer jev.batch for independent questions sharing state. Raw probabilities are preserved and policy is deterministic guidance, not a correctness guarantee. On an explicit tool error, continue without Jev only when the host can do so safely.")
     }
 
     async fn list_tools(

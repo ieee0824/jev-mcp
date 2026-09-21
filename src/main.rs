@@ -1,6 +1,8 @@
 mod client;
 mod error;
 mod eval;
+mod policy;
+mod profile;
 mod server;
 mod telemetry;
 mod types;
@@ -42,7 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let client = client::TypeSafeClient::from_env().map_err(std::io::Error::other)?;
     let telemetry = telemetry::Telemetry::from_env().map_err(std::io::Error::other)?;
-    let service = server::JevServer::with_telemetry(client, telemetry)
+    let policy = policy::PolicyConfig::from_env().map_err(std::io::Error::other)?;
+    let service = server::JevServer::with_config(client, telemetry, policy)
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;

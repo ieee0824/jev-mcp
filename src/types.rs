@@ -4,6 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::profile::ExecutionProfile;
+
 /// Text or structured context. Numbers, booleans and null are not valid at the top level.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -50,6 +52,8 @@ pub struct NoulInput {
     pub criteria: Option<NoulCriteria>,
     /// Defaults to TYPESAFE_MODEL, or jev-latest.
     pub model: Option<String>,
+    /// Overrides the server's JEV_PROFILE for this call.
+    pub profile: Option<ExecutionProfile>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -61,6 +65,8 @@ pub struct ChoiceInput {
     #[schemars(length(min = 1, max = 255))]
     pub criteria: BTreeMap<String, Option<Context>>,
     pub model: Option<String>,
+    /// Overrides the server's JEV_PROFILE for this call.
+    pub profile: Option<ExecutionProfile>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -72,6 +78,8 @@ pub struct ScoreInput {
     #[schemars(length(min = 2, max = 10))]
     pub criteria: Vec<Context>,
     pub model: Option<String>,
+    /// Overrides the server's JEV_PROFILE for this call.
+    pub profile: Option<ExecutionProfile>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -82,14 +90,22 @@ pub struct BatchInput {
     #[schemars(length(min = 1))]
     pub questions: BTreeMap<String, Question>,
     pub model: Option<String>,
+    /// Overrides the server's JEV_PROFILE for this call.
+    pub profile: Option<ExecutionProfile>,
 }
 
 impl BatchInput {
-    pub fn single(state: Context, question: Question, model: Option<String>) -> Self {
+    pub fn single(
+        state: Context,
+        question: Question,
+        model: Option<String>,
+        profile: Option<ExecutionProfile>,
+    ) -> Self {
         Self {
             state,
             questions: BTreeMap::from([("result".into(), question)]),
             model,
+            profile,
         }
     }
 

@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{
     error::ToolError,
+    profile::{ExecutionProfile, ProfileSet, ProfileSettings},
     types::{BatchInput, Evaluation},
 };
 
@@ -20,13 +21,20 @@ pub struct TypeSafeClient {
     endpoint: String,
     authorization: Option<header::HeaderValue>,
     default_model: String,
-    timeout: Duration,
-    retry_delay: Duration,
+    default_profile: ExecutionProfile,
+    profiles: ProfileSet,
+}
+
+pub struct EvaluationSuccess {
+    pub value: Value,
+    pub evaluation: Evaluation,
 }
 
 pub struct EvaluationReport {
-    pub result: Result<Value, ToolError>,
+    pub result: Result<EvaluationSuccess, ToolError>,
     pub attempts: usize,
+    pub timeout_count: usize,
+    pub profile: ExecutionProfile,
     pub requested_model: String,
     pub resolved_model: Option<String>,
     pub input_tokens: Option<u64>,
@@ -45,13 +53,24 @@ impl TypeSafeClient {
             Err(std::env::VarError::NotPresent) => "jev-latest".into(),
             Err(_) => return Err("TYPESAFE_MODEL must be valid UTF-8".into()),
         };
-        Self::new(ENDPOINT.into(), key, model)
+        let profile = ExecutionProfile::from_env()?;
+        Self::new_with_profile(ENDPOINT.into(), key, model, profile)
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         endpoint: String,
         key: Option<String>,
         model: String,
+    ) -> Result<Self, String> {
+        Self::new_with_profile(endpoint, key, model, ExecutionProfile::Reliable)
+    }
+
+    pub(crate) fn new_with_profile(
+        endpoint: String,
+        key: Option<String>,
+        model: String,
+        default_profile: ExecutionProfile,
     ) -> Result<Self, String> {
         if model.trim().is_empty() {
             return Err("TYPESAFE_MODEL must not be blank".into());
@@ -69,7 +88,6 @@ impl TypeSafeClient {
             .transpose()?;
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
             .redirect(Policy::none())
             .build()
             .map_err(|_| "Could not initialize the HTTP client".to_string())?;
@@ -78,14 +96,17 @@ impl TypeSafeClient {
             endpoint,
             authorization: api_key,
             default_model: model,
-            timeout: Duration::from_secs(60),
-            retry_delay: Duration::from_millis(500),
+            default_profile,
+            profiles: ProfileSet::default(),
         })
     }
 
     #[cfg(test)]
     pub async fn evaluate(&self, input: BatchInput) -> Result<Value, ToolError> {
-        self.evaluate_detailed(input).await.result
+        self.evaluate_detailed(input)
+            .await
+            .result
+            .map(|success| success.value)
     }
 
     pub async fn evaluate_detailed(&self, input: BatchInput) -> EvaluationReport {
@@ -93,15 +114,26 @@ impl TypeSafeClient {
             .model
             .clone()
             .unwrap_or_else(|| self.default_model.clone());
+        let profile = input.profile.unwrap_or(self.default_profile);
+        let settings = self.profiles.get(profile);
         let attempts = AtomicUsize::new(0);
+        let timeout_count = AtomicUsize::new(0);
         let result = if let Err(error) = input.validate() {
             Err(ToolError::validation(error))
         } else if let Some(key) = self.authorization.as_ref() {
-            match tokio::time::timeout(self.timeout, self.request(&input, key, &attempts)).await {
+            match tokio::time::timeout(
+                settings.total_budget,
+                self.request(&input, key, settings, &attempts, &timeout_count),
+            )
+            .await
+            {
                 Ok(result) => result,
-                Err(_) => Err(ToolError::timeout(
-                    "TypeSafe request exceeded the total timeout",
-                )),
+                Err(_) => {
+                    timeout_count.fetch_add(1, Ordering::Relaxed);
+                    Err(ToolError::timeout(
+                        "TypeSafe request exceeded the profile's total budget",
+                    ))
+                }
             }
         } else {
             Err(ToolError::authentication(
@@ -110,16 +142,18 @@ impl TypeSafeClient {
             ))
         };
         let (resolved_model, input_tokens, output_tokens) = match &result {
-            Ok((_, evaluation)) => (
-                Some(evaluation.model.clone()),
-                Some(evaluation.usage.input_tokens),
-                Some(evaluation.usage.output_tokens),
+            Ok(success) => (
+                Some(success.evaluation.model.clone()),
+                Some(success.evaluation.usage.input_tokens),
+                Some(success.evaluation.usage.output_tokens),
             ),
             Err(_) => (None, None, None),
         };
         EvaluationReport {
-            result: result.map(|(value, _)| value),
+            result,
             attempts: attempts.load(Ordering::Relaxed),
+            timeout_count: timeout_count.load(Ordering::Relaxed),
+            profile,
             requested_model,
             resolved_model,
             input_tokens,
@@ -131,104 +165,162 @@ impl TypeSafeClient {
         &self,
         input: &BatchInput,
         key: &header::HeaderValue,
+        settings: ProfileSettings,
         attempts: &AtomicUsize,
-    ) -> Result<(Value, Evaluation), ToolError> {
+        timeout_count: &AtomicUsize,
+    ) -> Result<EvaluationSuccess, ToolError> {
         let body = json!({
             "state": input.state,
             "model": input.model.as_ref().unwrap_or(&self.default_model),
             "questions": input.questions,
         });
-        for attempt in 0..3 {
+        for attempt in 0..=settings.max_retries {
             attempts.store(attempt + 1, Ordering::Relaxed);
-            let mut response = self
-                .http
-                .post(&self.endpoint)
-                .header(header::AUTHORIZATION, key.clone())
-                .json(&body)
-                .send()
-                .await
-                .map_err(|error| {
-                    if error.is_timeout() {
-                        ToolError::timeout("TypeSafe request timed out")
-                    } else {
-                        ToolError::network("Could not connect to TypeSafe API", None)
-                    }
-                })?;
-            let status = response.status().as_u16();
-            if matches!(status, 429 | 529) && attempt < 2 {
-                // Respect Retry-After seconds without shortening the server's requested delay.
-                // The outer timeout bounds all attempts and sleeps together.
-                let delay = response
-                    .headers()
-                    .get(header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .unwrap_or(self.retry_delay * (1 << attempt));
-                drop(response);
-                tokio::time::sleep(delay.min(self.timeout)).await;
-                continue;
-            }
-            if !response.status().is_success() {
-                // Do not echo remote bodies: they can contain credentials or submitted state.
-                return Err(match status {
-                    401 => ToolError::authentication(
-                        "TypeSafe authentication failed; check TYPESAFE_API_KEY",
-                        Some(status),
-                    ),
-                    422 => ToolError::validation_response(
-                        "TypeSafe rejected the request; check model and question definitions",
-                        status,
-                    ),
-                    429 => ToolError::rate_limit(
-                        "TypeSafe rate limit was exceeded after retries",
-                        status,
-                    ),
-                    529 => {
-                        ToolError::http("TypeSafe remained overloaded after retries", status, true)
-                    }
-                    _ => ToolError::http(
-                        "TypeSafe returned an unexpected HTTP response",
-                        status,
-                        status >= 500,
-                    ),
-                });
-            }
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| ToolError::network("Could not read TypeSafe response", Some(status)))?
+            match tokio::time::timeout(
+                settings.per_attempt_timeout,
+                self.attempt(input, key, &body),
+            )
+            .await
             {
-                if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                    return Err(ToolError::invalid_response(
-                        "TypeSafe response exceeds 8 MiB",
-                        status,
+                Err(_) => {
+                    timeout_count.fetch_add(1, Ordering::Relaxed);
+                    if settings.retry_timeouts && attempt < settings.max_retries {
+                        continue;
+                    }
+                    return Err(ToolError::timeout(
+                        "TypeSafe request exceeded the profile's per-attempt timeout",
                     ));
                 }
-                bytes.extend_from_slice(&chunk);
+                Ok(Err(error)) => {
+                    if error.kind == crate::error::ErrorKind::Timeout {
+                        timeout_count.fetch_add(1, Ordering::Relaxed);
+                        if settings.retry_timeouts && attempt < settings.max_retries {
+                            continue;
+                        }
+                    }
+                    return Err(error);
+                }
+                Ok(Ok(AttemptOutcome::Success(success))) => return Ok(success),
+                Ok(Ok(AttemptOutcome::Retry { status, delay })) => {
+                    if attempt < settings.max_retries {
+                        let fallback = settings.retry_delay * (1 << attempt);
+                        tokio::time::sleep(delay.unwrap_or(fallback).min(settings.total_budget))
+                            .await;
+                        continue;
+                    }
+                    return Err(match status {
+                        429 => ToolError::rate_limit(
+                            "TypeSafe rate limit was exceeded after retries",
+                            status,
+                        ),
+                        529 => ToolError::http(
+                            "TypeSafe remained overloaded after retries",
+                            status,
+                            true,
+                        ),
+                        _ => unreachable!("only retryable statuses produce Retry"),
+                    });
+                }
             }
-            let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                ToolError::invalid_response("TypeSafe returned invalid JSON", status)
-            })?;
-            let parsed: Evaluation = serde_json::from_value(value.clone()).map_err(|_| {
-                ToolError::invalid_response("TypeSafe returned an invalid answer structure", status)
-            })?;
-            if !parsed.matches(&input.questions) {
-                return Err(ToolError::invalid_response(
-                    "TypeSafe answers do not match the requested questions or value ranges",
-                    status,
-                ));
-            }
-            return Ok((value, parsed));
         }
         unreachable!("the final attempt always returns")
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_total_timeout(&mut self, timeout: Duration) {
-        self.timeout = timeout;
+    async fn attempt(
+        &self,
+        input: &BatchInput,
+        key: &header::HeaderValue,
+        body: &Value,
+    ) -> Result<AttemptOutcome, ToolError> {
+        let mut response = self
+            .http
+            .post(&self.endpoint)
+            .header(header::AUTHORIZATION, key.clone())
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    ToolError::timeout("TypeSafe request timed out")
+                } else {
+                    ToolError::network("Could not connect to TypeSafe API", None)
+                }
+            })?;
+        let status = response.status().as_u16();
+        if matches!(status, 429 | 529) {
+            let delay = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs);
+            return Ok(AttemptOutcome::Retry { status, delay });
+        }
+        if !response.status().is_success() {
+            // Do not echo remote bodies: they can contain credentials or submitted state.
+            return Err(match status {
+                401 => ToolError::authentication(
+                    "TypeSafe authentication failed; check TYPESAFE_API_KEY",
+                    Some(status),
+                ),
+                422 => ToolError::validation_response(
+                    "TypeSafe rejected the request; check model and question definitions",
+                    status,
+                ),
+                _ => ToolError::http(
+                    "TypeSafe returned an unexpected HTTP response",
+                    status,
+                    status >= 500,
+                ),
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| ToolError::network("Could not read TypeSafe response", Some(status)))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(ToolError::invalid_response(
+                    "TypeSafe response exceeds 8 MiB",
+                    status,
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| ToolError::invalid_response("TypeSafe returned invalid JSON", status))?;
+        let evaluation: Evaluation = serde_json::from_value(value.clone()).map_err(|_| {
+            ToolError::invalid_response("TypeSafe returned an invalid answer structure", status)
+        })?;
+        if !evaluation.matches(&input.questions) {
+            return Err(ToolError::invalid_response(
+                "TypeSafe answers do not match the requested questions or value ranges",
+                status,
+            ));
+        }
+        Ok(AttemptOutcome::Success(EvaluationSuccess {
+            value,
+            evaluation,
+        }))
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_profile_settings(
+        &mut self,
+        profile: ExecutionProfile,
+        settings: ProfileSettings,
+    ) {
+        self.profiles.set(profile, settings);
+    }
+}
+
+enum AttemptOutcome {
+    Success(EvaluationSuccess),
+    Retry {
+        status: u16,
+        delay: Option<Duration>,
+    },
 }
 
 #[cfg(test)]
@@ -246,7 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn total_timeout_bounds_slow_responses_and_long_retry_delays() {
+    async fn total_budget_bounds_slow_responses_and_long_retry_delays() {
         for template in [
             ResponseTemplate::new(200).set_delay(Duration::from_secs(5)),
             ResponseTemplate::new(429).insert_header("Retry-After", u64::MAX.to_string()),
@@ -260,11 +352,20 @@ mod tests {
             let mut client =
                 TypeSafeClient::new(mock.uri(), Some("test-secret".into()), "jev-latest".into())
                     .unwrap();
-            client.timeout = Duration::from_millis(100);
+            client.set_profile_settings(
+                ExecutionProfile::Reliable,
+                ProfileSettings {
+                    per_attempt_timeout: Duration::from_secs(5),
+                    total_budget: Duration::from_millis(100),
+                    max_retries: 2,
+                    retry_delay: Duration::from_millis(1),
+                    retry_timeouts: false,
+                },
+            );
             let error = client.evaluate(input()).await.unwrap_err();
             assert_eq!(error.kind, ErrorKind::Timeout);
             assert!(error.retryable);
-            assert!(error.message.contains("total timeout"));
+            assert!(error.message.contains("total budget"));
             assert_eq!(error.status, None);
         }
     }

@@ -14,7 +14,13 @@ use wiremock::{
     matchers::{body_json, header, method, path},
 };
 
-use crate::{client::TypeSafeClient, error::ErrorKind, server::JevServer, telemetry::Telemetry};
+use crate::{
+    client::TypeSafeClient,
+    error::ErrorKind,
+    profile::{ExecutionProfile, ProfileSettings},
+    server::JevServer,
+    telemetry::Telemetry,
+};
 
 #[derive(Clone, Default)]
 struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
@@ -73,6 +79,10 @@ fn assert_tool_error(
     }
     let content = serde_json::to_value(&result.content).unwrap();
     assert_eq!(content[0]["text"], error["message"]);
+    let policy = &result.structured_content.as_ref().unwrap()["policy"];
+    assert_eq!(policy["version"], 1);
+    assert_eq!(policy["disposition"], "reevaluate");
+    assert_eq!(policy["reason"], "evaluation_failed");
 }
 
 #[tokio::test]
@@ -118,11 +128,15 @@ async fn single_tools_send_typed_requests_and_preserve_results() {
             .await
             .unwrap();
         assert_eq!(reply.is_error, Some(false));
-        assert_eq!(reply.structured_content, Some(result.clone()));
+        let structured = reply.structured_content.as_ref().unwrap();
+        assert_eq!(structured["model"], result["model"]);
+        assert_eq!(structured["answers"], result["answers"]);
+        assert_eq!(structured["usage"], result["usage"]);
+        assert!(structured["policy"]["answers"]["result"]["disposition"].is_string());
         let content = serde_json::to_value(reply.content).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(content[0]["text"].as_str().unwrap()).unwrap(),
-            result
+            *structured
         );
     }
 }
@@ -159,7 +173,14 @@ async fn batch_round_trip_through_mcp_client() {
         let result = peer.call_tool(CallToolRequestParams::new("jev.batch").with_arguments(
             json!({"state":["evidence"], "questions":questions}).as_object().unwrap().clone()
         )).await.unwrap();
-        assert_eq!(result.structured_content, Some(expected));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["model"], expected["model"]);
+        assert_eq!(structured["answers"], expected["answers"]);
+        assert_eq!(structured["usage"], expected["usage"]);
+        assert_eq!(structured["policy"]["answers"].as_object().unwrap().len(), 3);
+        assert_eq!(structured["policy"]["answers"]["relevant"]["disposition"], "accept");
+        assert_eq!(structured["policy"]["answers"]["owner"]["disposition"], "verify");
+        assert_eq!(structured["policy"]["answers"]["risk"]["disposition"], "verify");
         peer.cancel().await.unwrap();
         task.await.unwrap();
     }).await.unwrap();
@@ -179,6 +200,10 @@ async fn invalid_input_never_reaches_api() {
         (
             "jev.noul",
             json!({"state":"s","instructions":"q","model":" "}),
+        ),
+        (
+            "jev.noul",
+            json!({"state":"s","instructions":"q","profile":"fast"}),
         ),
         (
             "jev.choice",
@@ -261,12 +286,29 @@ async fn network_and_timeout_failures_are_structured_tool_errors() {
         .mount(&mock)
         .await;
     let mut timeout_client = client(&mock, Some("test-secret"));
-    timeout_client.set_total_timeout(Duration::from_millis(50));
-    let timeout = JevServer::new(timeout_client)
-        .dispatch("jev.noul", noul_args())
-        .await
-        .unwrap();
+    timeout_client.set_profile_settings(
+        ExecutionProfile::Reliable,
+        ProfileSettings {
+            per_attempt_timeout: Duration::from_secs(1),
+            total_budget: Duration::from_millis(50),
+            max_retries: 2,
+            retry_delay: Duration::from_millis(1),
+            retry_timeouts: false,
+        },
+    );
+    let timeout_output = SharedBuffer::default();
+    let timeout = JevServer::with_telemetry(
+        timeout_client,
+        Telemetry::with_writer(timeout_output.clone()),
+    )
+    .dispatch("jev.noul", noul_args())
+    .await
+    .unwrap();
     assert_tool_error(&timeout, ErrorKind::Timeout, true, None);
+    let timeout_event = &timeout_output.events()[0];
+    assert_eq!(timeout_event["profile"], "reliable");
+    assert_eq!(timeout_event["attempts"], 1);
+    assert_eq!(timeout_event["timeout_count"], 1);
 }
 
 #[tokio::test]
@@ -312,6 +354,58 @@ async fn retries_rate_limit_and_overload_then_succeeds() {
 }
 
 #[tokio::test]
+async fn interactive_override_retries_one_timed_out_attempt_and_preserves_request_body() {
+    let mock = MockServer::start().await;
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    Mock::given(method("POST"))
+        .and(body_json(json!({
+            "state":"test evidence",
+            "model":"jev-latest",
+            "questions":{"result":{"type":"noul","instructions":"Is this relevant?"}}
+        })))
+        .respond_with(move |_: &wiremock::Request| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(response(json!({"result":{"type":"noul","noul":0.9}})))
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(response(json!({"result":{"type":"noul","noul":0.9}})))
+            }
+        })
+        .expect(2)
+        .mount(&mock)
+        .await;
+    let mut configured = client(&mock, Some("test-secret"));
+    configured.set_profile_settings(
+        ExecutionProfile::Interactive,
+        ProfileSettings {
+            per_attempt_timeout: Duration::from_millis(30),
+            total_budget: Duration::from_millis(300),
+            max_retries: 1,
+            retry_delay: Duration::ZERO,
+            retry_timeouts: true,
+        },
+    );
+    let report = configured
+        .evaluate_detailed(
+            serde_json::from_value(json!({
+                "state":"test evidence",
+                "questions":{"result":{"type":"noul","instructions":"Is this relevant?"}},
+                "profile":"interactive"
+            }))
+            .unwrap(),
+        )
+        .await;
+    assert!(report.result.is_ok());
+    assert_eq!(report.profile, ExecutionProfile::Interactive);
+    assert_eq!(report.attempts, 2);
+    assert_eq!(report.timeout_count, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn telemetry_records_success_retries_and_failure_without_private_input() {
     let mock = MockServer::start().await;
     let count = Arc::new(AtomicUsize::new(0));
@@ -351,8 +445,13 @@ async fn telemetry_records_success_retries_and_failure_without_private_input() {
 
     let success = &output.events()[0];
     assert_eq!(success["tool"], "jev.noul");
+    assert_eq!(success["schema_version"], 1);
+    assert_eq!(success["event"], "jev_call");
     assert_eq!(success["question_count"], 1);
     assert_eq!(success["attempts"], 2);
+    assert_eq!(success["retry_count"], 1);
+    assert_eq!(success["timeout_count"], 0);
+    assert_eq!(success["profile"], "reliable");
     assert_eq!(success["status"], "success");
     assert_eq!(success["requested_model"], "requested-model");
     assert_eq!(success["resolved_model"], "jev-test");
@@ -363,6 +462,9 @@ async fn telemetry_records_success_retries_and_failure_without_private_input() {
     let failure = &failure_output.events()[0];
     assert_eq!(failure["status"], "error");
     assert_eq!(failure["attempts"], 0);
+    assert_eq!(failure["retry_count"], 0);
+    assert_eq!(failure["timeout_count"], 0);
+    assert_eq!(failure["profile"], "reliable");
     assert_eq!(failure["error"]["kind"], "authentication");
     let serialized = format!("{success}{failure}");
     for private in [

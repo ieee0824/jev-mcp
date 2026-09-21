@@ -5,7 +5,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::error::ErrorKind;
+use crate::{error::ErrorKind, profile::ExecutionProfile};
 
 #[derive(Clone)]
 pub struct Telemetry {
@@ -25,6 +25,10 @@ pub struct CallTelemetry<'a> {
     pub question_count: usize,
     pub elapsed_ms: u64,
     pub attempts: usize,
+    pub retry_count: usize,
+    pub timeout_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ExecutionProfile>,
     pub status: CallStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<&'a str>,
@@ -36,6 +40,14 @@ pub struct CallTelemetry<'a> {
     pub output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<TelemetryError>,
+}
+
+#[derive(Serialize)]
+struct RecordedCall<'a> {
+    schema_version: u8,
+    event: &'static str,
+    #[serde(flatten)]
+    call: &'a CallTelemetry<'a>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,7 +99,12 @@ impl Telemetry {
         let Ok(mut writer) = writer.lock() else {
             return;
         };
-        if serde_json::to_writer(&mut *writer, event).is_ok() {
+        let record = RecordedCall {
+            schema_version: 1,
+            event: "jev_call",
+            call: event,
+        };
+        if serde_json::to_writer(&mut *writer, &record).is_ok() {
             let _ = writer.write_all(b"\n");
             let _ = writer.flush();
         }
