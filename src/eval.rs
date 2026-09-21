@@ -79,6 +79,7 @@ impl EvalCase {
             state: self.state.clone(),
             questions: BTreeMap::from([("case".into(), self.question.clone())]),
             model: None,
+            profile: None,
         }
         .validate()?;
         match (&self.question, &self.expected) {
@@ -185,14 +186,15 @@ async fn run_cases(
             state: case.state.clone(),
             questions: BTreeMap::from([("case".into(), case.question.clone())]),
             model: None,
+            profile: None,
         };
         let started = Instant::now();
         let report = client.evaluate_detailed(input).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         total_elapsed_ms = total_elapsed_ms.saturating_add(elapsed_ms);
         let result = match report.result {
-            Ok(value) => {
-                let measured = measured_value(&case.question, &value).ok_or_else(|| {
+            Ok(success) => {
+                let measured = measured_value(&case.question, &success.value).ok_or_else(|| {
                     "validated API response is missing the case answer".to_string()
                 })?;
                 let is_pass = case.expected.matches(&measured);

@@ -4,13 +4,13 @@
 
 [TypeSafe AI](https://docs.typesafe.ai/introduction) の判断モデル **Jev** を、Codex から利用するための軽量な MCP サーバーです。Rust で実装し、標準入出力（stdio）で MCP クライアントと通信します。
 
-Codex が要件の理解、コードの調査・編集、テストの実行を担い、その途中で必要になる分類、関連性の判定、候補の選択、評価を Jev に渡します。
+Codex が要件の理解、コードの調査・編集、テストの実行を担い、その途中で必要になる分類、関連性の判定、候補の選択、評価を Jev に渡します。Codexを調査と実行を担うSystem 2、Jevを閉じた選択肢に対する軽量なSystem 1として扱います。
 
 ```text
 Codex：調査・計画
   ↓ 判断に必要な情報と質問
 Jev：分類・選択・評価
-  ↓ 型付きの回答と確率分布
+  ↓ 型付きの回答、確率分布、決定論的な取扱い指針
 Codex：編集・テスト・次の行動
 ```
 
@@ -33,7 +33,7 @@ Codex：編集・テスト・次の行動
 - 変更に追加のレビューやテストが必要か
 - 提供した実行履歴から、作業が進んでいるか、同じ試行を繰り返しているか
 
-サーバー自身はリポジトリのファイルを読んだり、実行履歴を収集したりしません。判断材料は呼び出し側が `state` として渡します。
+サーバー自身はリポジトリのファイルを読んだり、実行履歴を収集したり、ツールを実行したりしません。判断材料と有限個の候補は呼び出し側が用意します。Jevは自由文のplannerやコマンド生成器として使いません。
 
 ## 必要なもの
 
@@ -73,7 +73,15 @@ TYPESAFE_API_KEY = "your_typesafe_api_key"
 ```toml
 [mcp_servers.jev]
 command = "/absolute/path/to/jev-mcp/target/release/jev-mcp"
-env_vars = ["TYPESAFE_API_KEY", "TYPESAFE_MODEL"]
+env_vars = [
+  "TYPESAFE_API_KEY",
+  "TYPESAFE_MODEL",
+  "JEV_PROFILE",
+  "JEV_POLICY_ACCEPT_THRESHOLD",
+  "JEV_POLICY_VERIFY_THRESHOLD",
+  "JEV_POLICY_OPEN_CHOICES",
+  "JEV_TELEMETRY",
+]
 tool_timeout_sec = 70
 ```
 
@@ -87,11 +95,15 @@ tool_timeout_sec = 70
 | --- | --- |
 | `TYPESAFE_API_KEY` | API 認証に使う Bearer トークン。未設定・空でもツール一覧は取得できますが、評価時にエラーを返します。 |
 | `TYPESAFE_MODEL` | 既定のモデル。省略時は `jev-latest`。各ツールの `model` 引数で上書きできます。 |
+| `JEV_PROFILE` | 既定の実行profile。`reliable`（既定）または `interactive`。各ツールの `profile` 引数で上書きできます。 |
+| `JEV_POLICY_ACCEPT_THRESHOLD` | policyが`accept`を返す確率・確実性の下限。既定は`0.90`。 |
+| `JEV_POLICY_VERIFY_THRESHOLD` | policyが`verify`を返す下限。既定は`0.60`。accept以下である必要があります。 |
+| `JEV_POLICY_OPEN_CHOICES` | 常に`reevaluate`とするChoice名のカンマ区切り一覧。既定では`unknown`、`other`、`unclear`と情報不足・該当なしを表す英語名を対象にします。空文字列で無効化できます。 |
 | `JEV_TELEMETRY` | `1` または `true` で、入力を含まない呼び出し統計を stderr に JSONL で出力します。既定は無効です。 |
 
 ### 呼び出しテレメトリ
 
-`JEV_TELEMETRY=1` を設定すると、ツール呼び出しごとに1行の JSON を stderr に出力します。成功時はツール名、質問数、所要時間、試行回数、要求・解決されたモデル、入出力トークン数を記録します。失敗時は構造化エラーの `kind` を記録します。
+`JEV_TELEMETRY=1` を設定すると、ツール呼び出しごとに1行の JSON を stderr に出力します。`schema_version: 1`と`event: "jev_call"`を持つJSONLで、ツール名、質問数、使用profile、所要時間、試行回数、再試行回数、timeout回数、要求・解決されたモデル、入出力トークン数を記録します。失敗時は構造化エラーの `kind` を記録します。固定されたevent名とschema versionにより、将来の集計CLIから行単位で処理できます。
 
 `state`、`instructions`、`criteria`、確率分布、API キーは記録しません。MCP 通信に使う stdout には出力しません。
 
@@ -116,11 +128,12 @@ $jev-decisions このテスト失敗と差分の関連性を評価して、次�
 - `state`：評価する情報。文字列、オブジェクト、配列を指定できます。
 - `instructions`：質問または判定したい条件。文字列、オブジェクト、配列を指定できます。
 - `model`：任意のモデル指定。省略時はサーバーの既定値を使います。
+- `profile`：任意の実行profile。`reliable`または`interactive`。APIへ送る判断材料には含まれません。
 - `criteria`：Choice では選択肢のマップ、Score では順序付きの評価基準、Noul では任意の Yes／No の説明です。
 
 未定義の引数はエラーになります。入力形式は [TypeSafe API リファレンス](https://docs.typesafe.ai/api) に基づきます。
 
-成功時は `model`、`answers`、`usage` を含む API 応答を返します。MCP の `structuredContent` に加え、`content` にも同じ内容を JSON 文字列で含めます。
+成功時はAPIの `model`、`answers`、`usage` を変更せずに返し、サーバーが算出した`policy`を追加します。MCP の `structuredContent` に加え、`content` にも同じ内容を JSON 文字列で含めます。
 
 単発ツールの回答は `answers.result` に入ります。`jev.batch` は呼び出し側が指定した質問 ID を維持します。
 
@@ -176,7 +189,13 @@ Noul に独立した `confidence` はありません。必要に応じて `crite
       "confidence": 0.75
     }
   },
-  "usage": { "input_tokens": 200, "output_tokens": 30 }
+  "usage": { "input_tokens": 200, "output_tokens": 30 },
+  "policy": {
+    "version": 1,
+    "answers": {
+      "result": { "disposition": "verify", "reason": "moderate_confidence" }
+    }
+  }
 }
 ```
 
@@ -243,11 +262,19 @@ Noul に独立した `confidence` はありません。必要に応じて `crite
 
 バッチ内の質問は互いの回答を参照できません。前の回答が次の判断に必要な場合は、その回答を新しい `state` に含めて別の呼び出しを行います。
 
-## 不確かな結果の扱い
+## latency profile
+
+`reliable`は従来相当の挙動を維持する既定profileです。1試行を30秒、再試行を含む全体を60秒に制限し、HTTP 429/529を最大2回再試行します。完了率を優先する評価やevalに向きます。
+
+`interactive`はcoding loopから頻繁に呼ぶ用途です。1試行を約1.5秒、全体を約3秒に制限し、timeoutまたはHTTP 429/529を最大1回再試行します。短い上限時間内で回答できなければ、成功に置き換えず`timeout`などの構造化エラーを返します。
+
+サーバー既定値は`JEV_PROFILE`で設定し、呼び出しごとに`profile`で上書きできます。profileはMCP側の実行制御であり、TypeSafe APIのrequest bodyには入りません。MCPクライアント側のtool timeoutは、使用するprofileの全体制限時間より長くしてください。
+
+## policyと不確かな結果の扱い
 
 Choice と Score の `confidence` は、回答の確率分布から算出される指標です。正解を保証する値ではありません。
 
-呼び出し側では、たとえば次のような分岐を設けられます。
+サーバーはJevの推論結果とは別に、各回答を`accept`、`verify`、`reevaluate`へ分類する決定論的なpolicyを返します。ChoiceとScoreは`confidence`、NoulはYes確率の0.5からの距離を使います。設定されたopen choiceが選ばれた場合は、confidenceが高くても`reevaluate`になります。
 
 ```text
 confidence >= 0.90
@@ -260,9 +287,17 @@ confidence < 0.60
     → 判断材料を追加して再評価する
 ```
 
-このしきい値は設計例です。サーバーは自動採用や再評価を強制しません。用途と実際の評価データに合わせて調整してください。Noul では Yes の確率に基づく別の基準が必要です。
+既定のしきい値は上の例と同じですが、環境変数で変更できます。policyは生の回答や確率分布を書き換えず、ツール実行、再呼び出し、権限判断も行いません。用途ごとにevalデータでしきい値を調整し、呼び出し側が結果の影響と実測 evidenceを合わせて次の行動を決めてください。
+
+confidenceは分布の集中度を示す指標であり、正解保証ではありません。`reevaluate`や不確かな分布を受けた場合、同じ入力を即座に再送するのではなく、Codexがコード、ログ、テスト結果などの判断材料を追加し、新しい`state`で評価します。
 
 詳しくは [TypeSafe の Confidence ドキュメント](https://docs.typesafe.ai/confidence) を参照してください。
+
+## 次行動とtool候補の選択
+
+次に読む、テストする、差分を確認する、編集する、ユーザーへ確認する、終了するといった候補をホストが用意し、`jev.choice`のChoice IDとして渡せます。tool選択でも、ホストが引数まで確定した候補にIDを付け、JevにはそのIDだけを選ばせます。返された文字列をコマンドや引数として実行する設計ではありません。
+
+複雑さ、推論の必要量、toolの複雑さ、リスク、次行動を同じstateから評価するときは`jev.batch`を使えます。ただしバッチ内の質問は独立しており、前の回答を後の質問から参照できません。具体的な再利用手順はSkillの[next-action/tool-selection recipe](skills/jev-decisions/references/action-selection.md)と[multi-axis recipe](skills/jev-decisions/references/multi-axis-decision.md)にあります。この用途は既存の`jev.choice`と`jev.batch`で表現できるため、新しいMCP toolは追加していません。
 
 ## 評価ケースを検証する
 
@@ -305,14 +340,16 @@ POST https://api.typesafe.ai/v1/systemone
 | 項目 | 動作 |
 | --- | --- |
 | 接続タイムアウト | 10秒 |
-| 1回のリクエストのタイムアウト | 30秒 |
-| 再試行を含む全体の制限時間 | 60秒 |
-| HTTP 429／529 | 最大2回再試行。通常は0.5秒、1秒と待機時間を増やす。秒数形式の `Retry-After` があれば従う。全体の制限時間は維持する。 |
+| `reliable` | 1試行30秒、全体60秒。HTTP 429/529を最大2回再試行。timeoutは再試行しない。 |
+| `interactive` | 1試行約1.5秒、全体約3秒。HTTP 429/529とtimeoutを最大1回再試行。 |
+| 再試行待機 | profileごとの短い待機を使い、秒数形式の `Retry-After` があれば尊重する。全体制限は常に維持する。 |
 | その他の HTTP エラー・通信エラー | 再試行せずにエラーを返す |
 | リダイレクト | 追従しない |
 | 応答サイズ | 最大8 MiB |
 
-入力の不備、キーの未設定、API エラー、不正な回答は `isError: true` の MCP ツール結果として返します。`structuredContent.error` には `kind`、`message`、`retryable` が入り、HTTP 応答がある場合は `status` も含まれます。`kind` は `validation`、`authentication`、`rate_limit`、`timeout`、`network`、`http`、`invalid_response` のいずれかです。呼び出し側は、この情報を使って再試行や人への確認を判断できます。未知のツール名には JSON-RPC エラーを返します。
+入力の不備、キーの未設定、API エラー、不正な回答は `isError: true` の MCP ツール結果として返します。`structuredContent.error` には `kind`、`message`、`retryable` が入り、HTTP 応答がある場合は `status` も含まれます。`kind` は `validation`、`authentication`、`rate_limit`、`timeout`、`network`、`http`、`invalid_response` のいずれかです。失敗時の`policy`は`reevaluate/evaluation_failed`で、回答を捏造しません。未知のツール名には JSON-RPC エラーを返します。
+
+fail-openはホスト側の責務です。Jevが利用できなくても、Codexが直接の調査、テスト、ユーザー要件だけで安全に進められる場合はJevなしで続行できます。Jevの回答がなければ成立しない判断を推測で補ったり、権限確認を省略したりはできません。つまりMCP serverは明示的に失敗し、agentが状況に応じて安全にfail openします。
 
 API のエラー本文や認証情報はエラーメッセージに含めません。標準出力は MCP メッセージ専用です。
 
@@ -320,11 +357,12 @@ API のエラー本文や認証情報はエラーメッセージに含めませ�
 
 ```sh
 cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all
+cargo build --release --locked
 ```
 
-GitHub Actions でも Rust 1.88 を使い、push、pull request、手動実行ごとに同じformat、Clippy、全テストと日本語評価fixtureのオフライン検証を実行します。
+GitHub Actions でも Rust 1.88 を使い、push、pull request、手動実行ごとに同じformat、Clippy、全テスト、release build、日本語評価fixtureのオフライン検証を実行します。
 
 テストではローカルのモック HTTP サーバーと、実際の stdio 子プロセスを使用します。TypeSafe の API キーや有料 API 呼び出しは不要です。
 
@@ -336,8 +374,8 @@ GitHub Actions でも Rust 1.88 を使い、push、pull request、手動実行�
 
 Codex は調査・実装・検証を進め、Jev はその途中の小さな判断を担当します。質問は1つの判断に絞り、複数の観点が必要なら分けて評価し、呼び出し側のコードで結果を組み合わせます。
 
-現在は実験段階です。4つの stdio MCP ツール、TypeSafe API との接続、入力・応答の検証、構造化エラー、再試行とタイムアウト、任意のJSONLテレメトリを実装しています。品質確認用として、ラベル付き評価JSONLのオフライン検証CLI、実API評価ランナー、12件の日本語fixtureも利用できます。
+現在は実験段階です。4つの stdio MCP ツール、TypeSafe API との接続、入力・応答の検証、2つのlatency profile、決定論的policy、構造化エラー、再試行とタイムアウト、任意のJSONLテレメトリを実装しています。品質確認用として、ラベル付き評価JSONLのオフライン検証CLI、実API評価ランナー、12件の日本語fixtureも利用できます。
 
-同梱する英語の `jev-decisions` スキルには、基本的なツール選択に加えて、障害仮説の順位付け、提出前の証拠充足、作業履歴の監視、コンテキスト選別、危険操作の助言的評価を必要時だけ読むreferenceとして収録しています。これらは既存の4ツールを組み合わせる手順であり、操作の自動実行や権限制御は行いません。
+同梱する英語の `jev-decisions` スキルには、基本的なツール選択に加えて、次行動と準備済みtool callの選択、複数軸評価、障害仮説の順位付け、提出前の証拠充足、作業履歴の監視、コンテキスト選別、危険操作の助言的評価を必要時だけ読むreferenceとして収録しています。これらは既存の4ツールを組み合わせる手順であり、操作の自動実行や権限制御は行いません。
 
-リポジトリの自動調査やエージェントの実行履歴収集は未実装です。また、Jev を組み込むことでトークン使用量、不要なファイル読み込み、重複した推論、待ち時間がどれだけ減るかは、今後の検証対象です。最終的なタスクの達成品質を維持できるかも含めて評価します。
+リポジトリの自動調査、エージェントの実行履歴収集、tool実行、tool引数生成、Codex/Claudeなどのモデルやsessionのルーティングは実装していません。また、Jev を組み込むことでトークン使用量、不要なファイル読み込み、重複した推論、待ち時間がどれだけ減るかは、今後の検証対象です。最終的なタスクの達成品質を維持できるかも含めて評価します。

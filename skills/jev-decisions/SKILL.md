@@ -7,6 +7,8 @@ description: "Use the Jev MCP server to classify and evaluate evidence during co
 
 Send evidence gathered during an investigation to Jev and use its judgment to guide the next investigation or verification step. The caller remains responsible for editing code, running tests, and making the final decision. Use Jev only when the judgment justifies an additional network call, and batch related judgments when they share evidence.
 
+Treat Jev as a fast System 1 judgment over a closed decision space. Codex remains the System 2 investigator and executor. Never ask Jev to generate a command, tool arguments, edit, plan, or free-form action.
+
 ## Connection and tool selection
 
 Use the configured Jev MCP tools. The server exposes `jev.noul`, `jev.choice`, `jev.score`, and `jev.batch`. Tool names may appear as `mcp__jev__jev_batch` or a similar qualified name, so inspect the available tools and their schemas.
@@ -29,6 +31,8 @@ When several candidates can be relevant at the same time, ask one Noul question 
 - For assessing progress, blockage, repetition, and verification readiness from a short caller-provided trace, read [references/trace-monitoring.md](references/trace-monitoring.md).
 - For selecting tool results or observations to retain from a long work history, read [references/context-selection.md](references/context-selection.md).
 - For advisory assessment of an operation's intent, target, impact, and observed outcome, read [references/safety-advisory.md](references/safety-advisory.md).
+- For choosing a next action or one fully prepared tool call, read [references/action-selection.md](references/action-selection.md).
+- For assessing complexity, reasoning, tool complexity, risk, and next action in one independent batch, read [references/multi-axis-decision.md](references/multi-axis-decision.md).
 
 ## Constructing questions
 
@@ -67,20 +71,23 @@ The following example is an argument object for `jev.batch`. Replace it with evi
 }
 ```
 
-For a single-tool call, pass `state`, `instructions`, any required `criteria`, and optionally `model` directly. Do not include `questions` or `type`. Choice `criteria` is a map of 1–255 named options. Score `criteria` is an array of 2–10 ordered levels. Omit `model` unless the user requests one, allowing the server default to apply.
+For a single-tool call, pass `state`, `instructions`, any required `criteria`, and optionally `model` or `profile` directly. Do not include `questions` or `type`. Choice `criteria` is a map of 1–255 named options. Score `criteria` is an array of 2–10 ordered levels. Omit `model` unless the user requests one, allowing the server default to apply. Use `profile: "interactive"` for a latency-bounded coding-loop hint and `profile: "reliable"` when completing the judgment is more important than a short response time.
 
 ## Interpreting results and acting
 
-- On success, read `model`, `answers`, and `usage` from `structuredContent`. If the client exposes only text, parse the equivalent JSON in `content`. A single-tool answer is under `answers.result`; batch answers are under `answers.<question_id>`.
+- On success, read `model`, `answers`, `usage`, and `policy` from `structuredContent`. If the client exposes only text, parse the equivalent JSON in `content`. A single-tool answer is under `answers.result`; batch answers are under `answers.<question_id>`.
 - Noul `noul` is the probability of Yes. Values near 0 indicate strong No; values near 0.5 are uncertain. Noul has no separate `confidence`.
 - Choice `choice` is the selected option. Also inspect `probabilities` and `confidence`. When option probabilities are close, do not treat the selected option as a confirmed cause.
 - Score `score` is the weighted average of zero-based level indices. With three levels it ranges from 0 to 2 and may be fractional. Do not interpret it as a 0–1 incident probability. Read `legend`, `probabilities`, and `confidence` with it.
 - `confidence` describes the answer distribution and does not guarantee correctness. Use a project-defined threshold when one exists. Otherwise, do not invent a universal acceptance threshold; consider the evidence and the consequence of the decision.
+- `policy.answers.<question_id>` is deterministic handling guidance configured by the server. `accept`, `verify`, and `reevaluate` do not rewrite the raw answer or authorize an action. Always retain and inspect the raw probability distribution.
 
 Choose and execute a concrete investigation or test based on the result, then verify it with observed behavior. Report “Jev judged this relevant” separately from “the diagnostic confirmed the cause.” A high probability does not replace a passing test, review, or authorization to merge or publish.
 
+When policy says `reevaluate`, an open option such as `unknown` wins, or the distribution is uncertain, do not immediately repeat the same call. Gather a missing log, source excerpt, test result, or other discriminating observation; add it to `state`; then reevaluate. If no obtainable evidence can distinguish the candidates, have Codex decide whether to ask the user or proceed conservatively.
+
 ## Errors and retries
 
-`isError: true` means the evaluation failed. Do not interpret it as No or a low score, and do not fabricate the missing answer.
+`isError: true` means the evaluation failed. Do not interpret it as No or a low score, and do not fabricate the missing answer. The server fails explicitly for unavailable service, timeout, rate limiting, invalid response, authentication, and validation errors.
 
-The server retries HTTP 429 and 529 responses at most twice and limits the complete operation to 60 seconds. After a tool error, do not repeatedly submit identical arguments. Correct input errors before retrying. For authentication errors, explain that configuration is required without asking the user to paste the key into chat. For an uncertain successful answer, gather new evidence or clarify the question before evaluating again.
+The selected latency profile controls timeout and retry behavior. After a tool error, do not repeatedly submit identical arguments. Correct input errors before retrying. For authentication errors, explain that configuration is required without asking the user to paste the key into chat. When the coding task can continue safely without this optional judgment, fail open at the agent layer: use direct inspection, tests, and the user's requirements, and state that Jev was unavailable. Stop or ask for evidence when proceeding would rely on fabricating a judgment or bypassing an existing permission requirement.

@@ -34,10 +34,13 @@ jobs:
         run: cargo +1.88.0 fmt --check
 
       - name: Run Clippy
-        run: cargo +1.88.0 clippy --locked --all-targets -- -D warnings
+        run: cargo +1.88.0 clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo +1.88.0 test --locked
+        run: cargo +1.88.0 test --locked --all
+
+      - name: Build release binary
+        run: cargo +1.88.0 build --release --locked
 
       - name: Validate Japanese evaluation fixture
         run: cargo +1.88.0 run --locked -- eval validate eval/ja-coding-minimal.jsonl
