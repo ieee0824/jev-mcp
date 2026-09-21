@@ -1,5 +1,7 @@
 # jev-mcp
 
+[![CI](https://github.com/ieee0824/jev-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ieee0824/jev-mcp/actions/workflows/ci.yml)
+
 [TypeSafe AI](https://docs.typesafe.ai/introduction) の判断モデル **Jev** を、Codex から利用するための軽量な MCP サーバーです。Rust で実装し、標準入出力（stdio）で MCP クライアントと通信します。
 
 Codex が要件の理解、コードの調査・編集、テストの実行を担い、その途中で必要になる分類、関連性の判定、候補の選択、評価を Jev に渡します。
@@ -321,6 +323,8 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+GitHub Actions でも Rust 1.88 を使い、push、pull request、手動実行ごとに同じformat、Clippy、全テストと日本語評価fixtureのオフライン検証を実行します。
 
 テストではローカルのモック HTTP サーバーと、実際の stdio 子プロセスを使用します。TypeSafe の API キーや有料 API 呼び出しは不要です。
 
