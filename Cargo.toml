@@ -3,6 +3,7 @@ name = "jev-mcp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
 description = "A stdio MCP server for TypeSafe AI's Jev decision model"
 
 [dependencies]

@@ -1,6 +1,7 @@
 # jev-mcp
 
 [![CI](https://github.com/ieee0824/jev-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ieee0824/jev-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [TypeSafe AI](https://docs.typesafe.ai/introduction) の判断モデル **Jev** を、Codex から利用するための軽量な MCP サーバーです。Rust で実装し、標準入出力（stdio）で MCP クライアントと通信します。
 
@@ -369,6 +370,10 @@ GitHub Actions でも Rust 1.88 を使い、push、pull request、手動実行�
 確認対象には、各ツールのリクエスト形式、混合バッチの MCP 通信、入力検証、構造化エラー、認証エラー、再試行、タイムアウト、不正・過大な応答、プライバシーを保つテレメトリ、評価JSONLの検証、モックAPIを使う評価ランナー、日本語fixture、スキルreference内のJSON例、stdioの初期化と終了が含まれます。
 
 実モデルの判断品質、費用、応答時間は、実際の API キーと用途に合ったデータで別途評価する必要があります。
+
+## ライセンス
+
+このプロジェクトは [MIT License](LICENSE) のもとで公開されています。
 
 ## 設計方針と実装状況
 
